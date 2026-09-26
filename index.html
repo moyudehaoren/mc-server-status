@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minecraft 开服状态</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a21;
+    --line: #262b36;
+    --text: #e6e9ef;
+    --muted: #8b93a7;
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --yellow: #f1c40f;
+    --gray: #7f8c9b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: radial-gradient(1200px 600px at 50% -10%, #1d2330 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .card {
+    width: 100%;
+    max-width: 560px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 28px 28px 20px;
+    box-shadow: 0 18px 50px rgba(0,0,0,.45);
+  }
+  h1 { margin: 0 0 4px; font-size: 20px; letter-spacing: .5px; }
+  .sub { margin: 0 0 22px; color: var(--muted); font-size: 13px; }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 18px 20px;
+    border-radius: 14px;
+    background: #12151b;
+    border: 1px solid var(--line);
+  }
+  .dot {
+    width: 16px; height: 16px; border-radius: 50%;
+    flex: 0 0 auto;
+    background: var(--gray);
+    box-shadow: 0 0 0 0 rgba(0,0,0,0);
+  }
+  .dot.on  { background: var(--green);  animation: pulse 2s infinite; }
+  .dot.off { background: var(--red); }
+  .dot.warn{ background: var(--yellow); }
+  .dot.unknown { background: var(--gray); }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(46,204,113,.55); }
+    70%  { box-shadow: 0 0 0 12px rgba(46,204,113,0); }
+    100% { box-shadow: 0 0 0 0 rgba(46,204,113,0); }
+  }
+  .status .text { font-size: 22px; font-weight: 600; }
+  .status .hint { margin-left: auto; color: var(--muted); font-size: 12px; text-align: right; max-width: 45%; }
+
+  .players { margin: 20px 0 6px; }
+  .count { font-size: 14px; color: var(--muted); }
+  .count strong { color: var(--text); font-size: 20px; }
+  .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; padding: 0; }
+  .chips li {
+    background: #1f2531; border: 1px solid var(--line);
+    color: #cfd6e4; font-size: 13px; padding: 5px 11px; border-radius: 999px;
+  }
+  .chips li.empty { background: transparent; border-style: dashed; color: var(--muted); }
+
+  .rows { margin-top: 18px; border-top: 1px solid var(--line); }
+  .row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 13px;
+  }
+  .row .label { color: var(--muted); width: 76px; flex: 0 0 auto; }
+  .row .val { font-weight: 600; }
+  .row .val.on { color: var(--green); }
+  .row .val.off { color: var(--red); }
+  .row .val.warn { color: var(--yellow); }
+  .row .val.unknown { color: var(--gray); }
+  .row .time { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+  footer {
+    display: flex; justify-content: space-between; gap: 12px;
+    margin-top: 16px; color: var(--muted); font-size: 12px;
+  }
+  footer a { color: #6ea8fe; text-decoration: none; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Minecraft 开服状态</h1>
+  <p class="sub" id="subtitle">正在读取状态…</p>
+
+  <div class="status">
+    <span class="dot unknown" id="dot"></span>
+    <span class="text" id="statusText">读取中</span>
+    <span class="hint" id="statusHint"></span>
+  </div>
+
+  <section class="players">
+    <div class="count"><strong id="playerCount">–</strong> <span id="playerMax"></span> 人在线</div>
+    <ul class="chips" id="playerList"></ul>
+  </section>
+
+  <section class="rows">
+    <div class="row">
+      <span class="label">游戏主机</span>
+      <span class="val unknown" id="gameState">–</span>
+      <span class="time" id="gameTime"></span>
+    </div>
+    <div class="row">
+      <span class="label">樱花隧道</span>
+      <span class="val unknown" id="tunnelState">–</span>
+      <span class="time" id="tunnelTime"></span>
+    </div>
+  </section>
+
+  <footer>
+    <span id="refreshInfo">每 30 秒自动刷新</span>
+    <span id="lastRefresh"></span>
+  </footer>
+</main>
+
+<script>
+// ── 可调参数 ────────────────────────────────────────────────────────────────
+// 游戏心跳超过该时长即视为"失联"（心跳脚本默认每 1 分钟上报一次）
+const HEARTBEAT_STALE_MINUTES = 3;
+// 隧道检测超过该时长即视为"检测器异常"（Actions 默认每 5 分钟检测，30 分钟节流写入）
+const TUNNEL_STALE_MINUTES = 45;
+const REFRESH_MS = 30 * 1000;
+
+// ── 工具函数 ────────────────────────────────────────────────────────────────
+function ageMinutes(iso) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  return (Date.now() - t) / 60000;
+}
+function humanAge(iso) {
+  const m = ageMinutes(iso);
+  if (m === null) return '无数据';
+  if (m < 1) return '刚刚';
+  if (m < 60) return Math.floor(m) + ' 分钟前';
+  const h = m / 60;
+  if (h < 24) return Math.floor(h) + ' 小时前';
+  return Math.floor(h / 24) + ' 天前';
+}
+async function loadJson(path) {
+  // 加时间戳绕过 CDN / 浏览器缓存
+  const res = await fetch(path + '?t=' + Date.now(), { cache: 'no-store' });
+  if (!res.ok) throw new Error(path + ' HTTP ' + res.status);
+  return await res.json();
+}
+
+// ── 状态判定 ────────────────────────────────────────────────────────────────
+function computeState(game, tunnel) {
+  const gameClaimsOnline = game.online === true;
+  const gameAge = ageMinutes(game.updated_at);
+  const gameStale = gameClaimsOnline && (gameAge === null || gameAge > HEARTBEAT_STALE_MINUTES);
+  const gameOnline = gameClaimsOnline && !gameStale;
+
+  const tunnelAge = ageMinutes(tunnel.updated_at);
+  const tunnelKnown = tunnel.updated_at != null && tunnelAge !== null && tunnelAge <= TUNNEL_STALE_MINUTES;
+  const tunnelOnline = tunnelKnown && tunnel.online === true;
+
+  if (gameStale) {
+    return { key: 'unknown', title: '主机失联 / 数据过期', hint: '心跳已停止更新，可能电脑关机或脚本未运行' };
+  }
+  if (gameOnline && tunnelOnline) {
+    return { key: 'on', title: '开服中', hint: '' };
+  }
+  if (gameOnline && !tunnelOnline) {
+    return {
+      key: 'warn', title: '游戏已开，隧道未开',
+      hint: tunnelKnown ? '朋友暂时连不上，请开樱花穿透' : '隧道状态未知（未配置隧道检测）'
+    };
+  }
+  if (!gameOnline && tunnelOnline) {
+    return { key: 'warn', title: '隧道在线，游戏未开', hint: '穿透开着但游戏没开' };
+  }
+  return { key: 'off', title: '未开服', hint: '' };
+}
+
+// ── 渲染 ────────────────────────────────────────────────────────────────────
+function render(game, tunnel) {
+  const st = computeState(game, tunnel);
+
+  document.getElementById('dot').className = 'dot ' + st.key;
+  document.getElementById('statusText').textContent = st.title;
+  document.getElementById('statusHint').textContent = st.hint || '';
+
+  // 玩家
+  const names = Array.isArray(game.players) ? game.players : [];
+  const count = typeof game.count === 'number' ? game.count : names.length;
+  const online = st.key === 'on' || (game.online === true && st.key !== 'unknown');
+  document.getElementById('playerCount').textContent = online ? count : '–';
+  document.getElementById('playerMax').textContent = online && game.max ? '/ ' + game.max : '';
+
+  const list = document.getElementById('playerList');
+  list.innerHTML = '';
+  if (online && names.length) {
+    for (const n of names) {
+      const li = document.createElement('li');
+      li.textContent = n;
+      list.appendChild(li);
+    }
+  } else {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = online ? '暂无玩家在线' : '离线';
+    list.appendChild(li);
+  }
+
+  // 子状态：游戏主机
+  const gEl = document.getElementById('gameState');
+  if (st.key === 'unknown') { gEl.className = 'val unknown'; gEl.textContent = '失联'; }
+  else if (game.online === true) { gEl.className = 'val on'; gEl.textContent = '运行中'; }
+  else { gEl.className = 'val off'; gEl.textContent = '未运行'; }
+  document.getElementById('gameTime').textContent = humanAge(game.updated_at);
+  if (game.version) document.getElementById('gameTime').textContent += ' · ' + game.version;
+
+  // 子状态：樱花隧道
+  const tEl = document.getElementById('tunnelState');
+  if (!tunnel.updated_at) { tEl.className = 'val unknown'; tEl.textContent = '未配置'; }
+  else if (!tunnelKnown(tunnel)) { tEl.className = 'val unknown'; tEl.textContent = '数据过期'; }
+  else if (tunnel.online === true) { tEl.className = 'val on'; tEl.textContent = '在线'; }
+  else { tEl.className = 'val off'; tEl.textContent = '离线'; }
+  const tTime = humanAge(tunnel.updated_at);
+  document.getElementById('tunnelTime').textContent =
+    tunnel.status_reason ? tTime + ' · ' + tunnel.status_reason : tTime;
+
+  document.getElementById('lastRefresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+}
+
+function tunnelKnown(tunnel) {
+  const a = ageMinutes(tunnel.updated_at);
+  return tunnel.updated_at != null && a !== null && a <= TUNNEL_STALE_MINUTES;
+}
+
+// ── 主循环 ──────────────────────────────────────────────────────────────────
+async function refresh() {
+  const sub = document.getElementById('subtitle');
+  try {
+    const [game, tunnel] = await Promise.all([
+      loadJson('status.json'),
+      loadJson('tunnel.json').catch(() => ({}))   // 隧道文件可选
+    ]);
+    sub.textContent = '心跳：主机脚本 → status.json　|　隧道：GitHub Actions → tunnel.json';
+    render(game, tunnel || {});
+  } catch (err) {
+    sub.textContent = '读取数据失败：' + err.message;
+    document.getElementById('dot').className = 'dot unknown';
+    document.getElementById('statusText').textContent = '状态未知';
+    document.getElementById('statusHint').textContent = '';
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+// 页面重新获得焦点时立即刷新一次
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>
