@@ -26,7 +26,38 @@ const checkOnly = args.includes('--check') || args.includes('--dry-run');
 const wantPages = args.includes('--pages');
 
 const EXCLUDE_DIRS = new Set(['.git', '.secrets', 'node_modules', '.npm-cache']);
-const EXCLUDE_FILE = /(^|\/)(\.DS_Store|Thumbs\.db|[^/]*\.log)$/;
+
+// 读取 .gitignore，并叠加"令牌类文件"安全兜底规则：
+// 这些文件绝不能进公开仓库（GitHub 的 secret scanning 也会拒绝这种提交）。
+function loadIgnoreMatchers() {
+  const patterns = [
+    'host.config.json', '.secrets/', '*.log', '*.token', '*.key', '*.pem', '.env', '.env.*'
+  ];
+  try {
+    for (const line of fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/)) {
+      const p = line.trim();
+      if (!p || p.startsWith('#') || p.startsWith('!')) continue;
+      patterns.push(p);
+    }
+  } catch { /* 没有 .gitignore 就只用兜底规则 */ }
+
+  return patterns.map((raw) => {
+    let p = raw.replace(/^\//, '');
+    const dirOnly = p.endsWith('/');
+    if (dirOnly) p = p.slice(0, -1);
+    const hasSlash = p.includes('/');
+    const body = p
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, '\u0000')
+      .replace(/\*/g, '[^/]*')
+      .replace(/\u0000/g, '.*')
+      .replace(/\?/g, '[^/]');
+    return new RegExp((hasSlash ? '^' : '(^|.*/)') + body + (dirOnly ? '(/.*)?$' : '$'));
+  });
+}
+
+const ignoreMatchers = loadIgnoreMatchers();
+const isIgnored = (rel) => ignoreMatchers.some((r) => r.test(rel));
 
 function readToken() {
   const candidates = [
@@ -69,18 +100,19 @@ async function api(pathname, token, options = {}) {
   return { status: res.status, ok: res.ok, json };
 }
 
-function walk(dir, base, out = []) {
+function walk(dir, base, out = [], ignored = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (EXCLUDE_DIRS.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walk(full, base, out);
+      walk(full, base, out, ignored);
     } else {
       const rel = path.relative(base, full).split(path.sep).join('/');
-      if (!EXCLUDE_FILE.test(rel)) out.push(rel);
+      if (isIgnored(rel)) ignored.push(rel);
+      else out.push(rel);
     }
   }
-  return out;
+  return { files: out, ignored };
 }
 
 const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponent).join('/');
@@ -136,9 +168,14 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
     else console.error(`✗ 设置变量 ${name} 失败：HTTP ${r.status} ${r.json?.message || ''}`);
   }
 
-  const files = walk(root, root).sort();
+  const { files: fileList, ignored } = walk(root, root);
+  const files = fileList.sort();
   console.log(`\n将同步 ${files.length} 个文件：`);
   for (const f of files) console.log('  ' + f);
+  if (ignored.length) {
+    console.log(`已排除 ${ignored.length} 个被忽略的文件（含令牌，不会推送）：`);
+    for (const f of ignored) console.log('  ✗ ' + f);
+  }
 
   if (checkOnly) {
     console.log('\n--check 完成，未写入任何内容。');
