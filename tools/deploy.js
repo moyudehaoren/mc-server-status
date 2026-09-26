@@ -33,6 +33,9 @@ function loadIgnoreMatchers() {
   const patterns = [
     'host.config.json', '.secrets/', '*.log', '*.token', '*.key', '*.pem', '.env', '.env.*'
   ];
+  // status.json / tunnel.json 由自动化维护（心跳脚本 + Actions 工作流），
+  // 本地同步默认跳过，免得把过期的本地状态覆盖上去。首次建仓用 --with-state 强制包含。
+  if (!args.includes('--with-state')) patterns.push('status.json', 'tunnel.json');
   try {
     for (const line of fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/)) {
       const p = line.trim();
@@ -166,6 +169,23 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
     }
     if (r.ok) console.log(`✓ 仓库变量 ${name} = ${value}`);
     else console.error(`✗ 设置变量 ${name} 失败：HTTP ${r.status} ${r.json?.message || ''}`);
+  }
+
+  // --trigger-workflow 文件名（例如 tunnel-check.yml）：手动触发一次 workflow_dispatch
+  const twIndex = args.indexOf('--trigger-workflow');
+  if (twIndex >= 0 && args[twIndex + 1]) {
+    const wf = args[twIndex + 1];
+    const r = await api(
+      `/repos/${owner}/${REPO_NAME}/actions/workflows/${encodeURIComponent(wf)}/dispatches`,
+      token,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ref: branch })
+      }
+    );
+    if (r.status === 204) console.log(`✓ 已触发工作流 ${wf}（ref=${branch}）`);
+    else console.error(`✗ 触发工作流失败：HTTP ${r.status} ${r.json?.message || ''}（需要令牌有 Actions: Read and write）`);
   }
 
   const { files: fileList, ignored } = walk(root, root);
