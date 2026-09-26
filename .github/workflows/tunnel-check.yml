@@ -1,0 +1,45 @@
+name: 樱花隧道状态检测
+
+# 每 5 分钟查询一次 SakuraFrp 隧道在线状态，结果写入 tunnel.json。
+# 状态没变化时最多每 30 分钟写一次（TUNNEL_KEEPALIVE_MINUTES），避免刷提交。
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write      # 需要写权限才能提交 tunnel.json
+
+concurrency:
+  group: tunnel-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 查询樱花隧道状态
+        env:
+          # 在 仓库 Settings → Secrets and variables → Actions 里配置：
+          #   Secrets   : NATFRP_TOKEN   = 樱花访问密钥（Access Token）
+          #   Variables : NATFRP_TUNNEL  = 隧道 ID 或隧道名称
+          # 没配置时脚本会跳过检测并保持 tunnel.json 不变，不会让工作流失败。
+          NATFRP_TOKEN: ${{ secrets.NATFRP_TOKEN }}
+          NATFRP_TUNNEL: ${{ vars.NATFRP_TUNNEL }}
+          TUNNEL_KEEPALIVE_MINUTES: '30'
+        run: node scripts/check_tunnel.mjs
+
+      - name: 提交变更
+        run: |
+          if git diff --quiet -- tunnel.json; then
+            echo "tunnel.json 无变化，跳过提交"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tunnel.json
+          git commit -m "chore(tunnel): 更新樱花隧道状态 $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
