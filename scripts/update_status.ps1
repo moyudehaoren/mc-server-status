@@ -54,7 +54,8 @@ param(
     [switch]$TunnelOnly,
     [switch]$Watch,
     [int]$WatchFastSeconds = 5,
-    [int]$WatchIdleSeconds = 10
+    [int]$WatchIdleSeconds = 10,
+    [int]$WatchStaleMinutes = 3
 )
 
 $ErrorActionPreference = 'Stop'
@@ -286,7 +287,7 @@ function Get-MachineStats {
 
     # memory + uptime (Win32_OperatingSystem property names are locale independent)
     try {
-        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 15 -ErrorAction Stop
         $totalKb = [double]$os.TotalVisibleMemorySize
         $freeKb = [double]$os.FreePhysicalMemory
         if ($totalKb -gt 0) {
@@ -302,7 +303,7 @@ function Get-MachineStats {
 
     # cpu load: performance class first, Win32_Processor as fallback
     try {
-        $perf = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -ErrorAction Stop |
+        $perf = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -OperationTimeoutSec 15 -ErrorAction Stop |
             Where-Object { $_.Name -eq '_Total' } | Select-Object -First 1
         if ($perf -and $null -ne $perf.PercentProcessorTime) {
             $stats.cpu_percent = [int]$perf.PercentProcessorTime
@@ -310,7 +311,7 @@ function Get-MachineStats {
     } catch { }
     if (-not $stats.Contains('cpu_percent')) {
         try {
-            $loads = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop |
+            $loads = @(Get-CimInstance -ClassName Win32_Processor -OperationTimeoutSec 15 -ErrorAction Stop |
                 Where-Object { $null -ne $_.LoadPercentage } | ForEach-Object { [int]$_.LoadPercentage })
             if ($loads.Count -gt 0) {
                 $stats.cpu_percent = [int](($loads | Measure-Object -Average).Average)
@@ -417,6 +418,8 @@ $script:LastCycleOnline  = $null
 $script:LastTunnelCheck  = [datetime]::MinValue
 $script:LastTunnelPush   = [datetime]::MinValue
 $script:LastTunnelStateKey = $null
+$script:AliveFile        = Join-Path $PSScriptRoot 'watcher-alive.txt'
+$script:LastAliveWrite   = [datetime]::MinValue
 
 $headers = @{
     Authorization = "Bearer $Token"
@@ -429,7 +432,7 @@ function Read-RemoteStatus {
     param([switch]$Force)
     if ($script:RemoteLoaded -and -not $Force) { return }
     try {
-        $raw = Invoke-RestMethod -Uri "$contentsUri`?ref=$Branch" -Headers $headers -Method Get
+        $raw = Invoke-RestMethod -Uri "$contentsUri`?ref=$Branch" -Headers $headers -Method Get -TimeoutSec 30
         $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($raw.content -replace '\s', '')))
         $remote = $text | ConvertFrom-Json
         $script:RemoteOnline = [bool]$remote.online
@@ -576,7 +579,7 @@ function Invoke-HeartbeatCycle {
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         if ($script:RemoteSha) { $body['sha'] = $script:RemoteSha } else { $body.Remove('sha') }
         try {
-            $response = Invoke-RestMethod -Uri $contentsUri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json'
+            $response = Invoke-RestMethod -Uri $contentsUri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 30
             $shaShort = if ($response.commit.sha) { $response.commit.sha.Substring(0, 7) } else { '?' }
             Write-Log "Published status.json (commit $shaShort)."
             $script:LastPushFailed = $false
@@ -603,7 +606,7 @@ function Publish-TunnelStatus {
     param([Parameter(Mandatory = $true)][string]$Json)
     $uri = "https://api.github.com/repos/$Owner/$Repo/contents/tunnel.json"
     $sha = $null
-    try { $sha = (Invoke-RestMethod -Uri "$uri`?ref=$Branch" -Headers $headers -Method Get).sha } catch { }
+    try { $sha = (Invoke-RestMethod -Uri "$uri`?ref=$Branch" -Headers $headers -Method Get -TimeoutSec 30).sha } catch { }
     $body = @{
         message = 'chore(tunnel): update SakuraFrp tunnel status'
         content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json))
@@ -611,7 +614,7 @@ function Publish-TunnelStatus {
     }
     if ($sha) { $body['sha'] = $sha }
     try {
-        Invoke-RestMethod -Uri $uri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json' | Out-Null
+        Invoke-RestMethod -Uri $uri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 30 | Out-Null
         return $true
     } catch {
         Write-Log ("Tunnel publish failed: {0}" -f $_.Exception.Message)
@@ -671,6 +674,29 @@ function Update-TunnelStatus {
     }
 }
 
+function Write-AliveStamp {
+    param([switch]$Force)
+    # Cheap liveness marker: a hung watcher stops updating it, which lets the
+    # next instance (watchdog or src/start.ps1) detect the hang and take over.
+    try {
+        $now = Get-Date
+        if (-not $Force -and $script:LastAliveWrite -ne [datetime]::MinValue -and
+            ($now - $script:LastAliveWrite).TotalSeconds -lt 30) { return }
+        Set-Content -LiteralPath $script:AliveFile -Value $now.ToString('o') -Encoding ASCII
+        $script:LastAliveWrite = $now
+    } catch { }
+}
+
+function Get-AliveAgeMinutes {
+    try {
+        if (-not (Test-Path -LiteralPath $script:AliveFile)) { return [double]::MaxValue }
+        $stamp = (Get-Content -LiteralPath $script:AliveFile -Raw).Trim()
+        return ((Get-Date) - [datetime]::Parse($stamp)).TotalMinutes
+    } catch {
+        return [double]::MaxValue
+    }
+}
+
 # ------------------------------------------------------------------- main flow
 if ($TunnelOnly) {
     if (-not $script:TunnelToken -or -not $script:TunnelSelector) {
@@ -682,18 +708,42 @@ if ($TunnelOnly) {
 }
 
 if ($Watch) {
-    # single instance: the watchdog task may launch us while we are already running
+    # Single instance. The watchdog may launch us while a healthy watcher runs -
+    # but a hung watcher (network or WMI calls can block forever) stops stamping
+    # its alive file, so in that case take over instead of dying behind the lock.
     $mutex = New-Object System.Threading.Mutex($false, 'Local\MC-Server-Status-Watch')
     if (-not $mutex.WaitOne(0)) {
-        Write-Log 'Another watcher is already running - exiting.'
-        exit 0
+        $aliveAge = Get-AliveAgeMinutes
+        if ($aliveAge -lt $WatchStaleMinutes) {
+            Write-Log ("Another watcher is running (alive {0:N1} min ago) - exiting." -f $aliveAge)
+            exit 0
+        }
+        Write-Log ("Running watcher looks hung (no alive stamp for {0:N1} min) - taking over." -f $aliveAge)
+        try {
+            Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -OperationTimeoutSec 15 -ErrorAction Stop |
+                Where-Object { $_.CommandLine -and $_.CommandLine -like '*update_status.ps1*' -and $_.ProcessId -ne $PID } |
+                ForEach-Object {
+                    Write-Log ("Killing hung watcher PID {0}." -f $_.ProcessId)
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+        } catch {
+            Write-Log ("Could not enumerate the hung watcher: {0}" -f $_.Exception.Message)
+        }
+        Start-Sleep -Seconds 3
+        if (-not $mutex.WaitOne(5000)) {
+            Write-Log 'Could not take the watcher lock - exiting.'
+            exit 0
+        }
     }
-    Write-Log ("Watch mode started (fast {0}s online / idle {1}s offline)." -f $WatchFastSeconds, $WatchIdleSeconds)
+    Write-AliveStamp -Force
+    Write-Log ("Watch mode started (fast {0}s online / idle {1}s offline, stale after {2} min)." -f `
+        $WatchFastSeconds, $WatchIdleSeconds, $WatchStaleMinutes)
     try {
         while ($true) {
             $cycle = Invoke-HeartbeatCycle
             if ($cycle.Error) { Write-Log ("Cycle error: {0}" -f $cycle.Error) }
             Update-TunnelStatus
+            Write-AliveStamp
             $wait = if ($cycle.Online) { $WatchFastSeconds } else { $WatchIdleSeconds }
             if ($cycle.Error -and -not $cycle.Pushed) { $wait = [Math]::Max($wait, 30) }
             Start-Sleep -Seconds $wait

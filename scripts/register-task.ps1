@@ -29,7 +29,7 @@
 [CmdletBinding()]
 param(
     [string]$TaskName = 'MC-Server-Status-Heartbeat',
-    [int]$IntervalMinutes = 30,
+    [int]$IntervalMinutes = 10,
     [string]$ScriptPath,
     [switch]$Uninstall,
     [switch]$Status,
