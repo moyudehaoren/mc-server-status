@@ -188,6 +188,26 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
     else console.error(`✗ 触发工作流失败：HTTP ${r.status} ${r.json?.message || ''}（需要令牌有 Actions: Read and write）`);
   }
 
+  // --delete 路径：删除仓库里的文件（可写多次），用于清理已废弃的文件
+  const deleteTargets = [];
+  args.forEach((a, i) => {
+    if (a === '--delete' && args[i + 1]) deleteTargets.push(args[i + 1]);
+  });
+  for (const rel of deleteTargets) {
+    const existing = await api(`/repos/${owner}/${REPO_NAME}${contentPath(rel)}?ref=${branch}`, token);
+    if (!existing.ok) {
+      console.log(`• 远端不存在，跳过删除：${rel}`);
+      continue;
+    }
+    const del = await api(`/repos/${owner}/${REPO_NAME}${contentPath(rel)}`, token, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: `chore: 删除 ${rel}`, sha: existing.json.sha, branch })
+    });
+    if (del.ok) console.log(`✓ 已删除远端文件 ${rel}`);
+    else console.error(`✗ 删除失败 ${rel}：HTTP ${del.status} ${del.json?.message || ''}`);
+  }
+
   const { files: fileList, ignored } = walk(root, root);
   const files = fileList.sort();
   console.log(`\n将同步 ${files.length} 个文件：`);
