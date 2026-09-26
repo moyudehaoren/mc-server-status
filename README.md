@@ -138,6 +138,7 @@ mc-server-status/
 | `-TimeoutMs` | `3000` | 单次连接/读取超时 |
 | `-ProtocolVersion` | `767` | 握手用的协议号，一般不用改 |
 | `-KeepAliveMinutes` | `10` | 在线期间最长多久刷新一次（防止刷提交） |
+| `-MinPushIntervalMinutes` | `2` | 仅"玩家列表变化"时的最小推送间隔；开服/关服不受此限制，`0` = 不节流 |
 | `-ConfigPath` / `-LogFile` | `scripts/host.config.json` / `scripts/heartbeat.log` | 配置与日志路径 |
 
 ## 上报节流规则（为什么不会刷屏提交）
@@ -146,6 +147,10 @@ mc-server-status/
 - 在线期间：距上次上报超过 `KeepAliveMinutes`（默认 10 分钟）才再报一次
 - 离线且远端已是离线：**完全不上报**（挂机时不产生任何提交）
 - 隧道侧同理：状态没变化时最多每 30 分钟写一次 `tunnel.json`
+
+> ⚠️ 页面上的"数据过期"阈值（`index.html` 里的 `HEARTBEAT_STALE_MINUTES`，默认 **15 分钟**）
+> 必须**明显大于** `KeepAliveMinutes`（默认 10 分钟），否则游戏中页面会误报"主机失联"。
+> 改了一个记得同步改另一个。
 
 ## 本地测试工具
 
