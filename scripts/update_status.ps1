@@ -35,6 +35,7 @@ param(
     [int]$ProtocolVersion,
     [int]$TimeoutMs,
     [int]$KeepAliveMinutes,
+    [int]$MinPushIntervalMinutes = -1,
     [string]$ConfigPath,
     [string]$LogFile,
     [switch]$Force,
@@ -83,6 +84,12 @@ if (-not $ServerPort -or $ServerPort -le 0) { $ServerPort = 25565 }
 if (-not $ProtocolVersion -or $ProtocolVersion -le 0) { $ProtocolVersion = 767 }
 if (-not $TimeoutMs -or $TimeoutMs -le 0) { $TimeoutMs = 3000 }
 if ($KeepAliveMinutes -le 0) { $KeepAliveMinutes = 10 }
+# -1 means "not specified": take it from config, else 2 minutes; explicit 0 disables throttling
+if ($MinPushIntervalMinutes -lt 0) {
+    $cfgMinPush = Get-CfgValue 'minPushIntervalMinutes'
+    if ($null -ne $cfgMinPush -and "$cfgMinPush" -ne '') { $MinPushIntervalMinutes = [int]$cfgMinPush }
+    if ($MinPushIntervalMinutes -lt 0) { $MinPushIntervalMinutes = 2 }
+}
 
 # ------------------------------------------------------------------- logging
 function Write-Log {
@@ -377,26 +384,33 @@ try {
 $stateKey = '{0}|{1}' -f $status.online, ($status.players -join ',')
 $shouldPush = [bool]$Force
 
+if (-not $shouldPush -and $null -eq $remote) { $shouldPush = $true }
+
 if (-not $shouldPush) {
-    if ($null -eq $remote) {
+    $remoteKey = '{0}|{1}' -f $remote.online, ((@($remote.players)) -join ',')
+    $remoteAgeMinutes = [double]::MaxValue
+    if ($remote.updated_at) {
+        try {
+            $remoteAgeMinutes = ((Get-Date).ToUniversalTime() - [datetime]::Parse($remote.updated_at).ToUniversalTime()).TotalMinutes
+        } catch { }
+    }
+
+    if ($remote.online -ne $status.online) {
+        # online/offline transition: publish immediately
         $shouldPush = $true
-    } else {
-        $remoteKey = '{0}|{1}' -f $remote.online, ((@($remote.players)) -join ',')
-        if ($remoteKey -ne $stateKey) {
+        Write-Log 'Online state changed, publishing.'
+    } elseif ($remoteKey -ne $stateKey) {
+        # only the player list changed: throttle to avoid commit spam (Pages has a build rate limit)
+        if ($MinPushIntervalMinutes -le 0 -or $remoteAgeMinutes -ge $MinPushIntervalMinutes) {
             $shouldPush = $true
-            Write-Log 'State changed, publishing.'
-        } elseif ($status.online -eq $true) {
-            $remoteAgeMinutes = [double]::MaxValue
-            if ($remote.updated_at) {
-                try {
-                    $remoteAgeMinutes = ((Get-Date).ToUniversalTime() - [datetime]::Parse($remote.updated_at).ToUniversalTime()).TotalMinutes
-                } catch { }
-            }
-            if ($remoteAgeMinutes -ge $KeepAliveMinutes) {
-                $shouldPush = $true
-                Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $remoteAgeMinutes)
-            }
+            Write-Log 'Player list changed, publishing.'
+        } else {
+            Write-Log ("Player list changed but last push was {0:N1} min ago (< {1} min), holding off." -f $remoteAgeMinutes, $MinPushIntervalMinutes)
         }
+    } elseif ($status.online -eq $true -and $remoteAgeMinutes -ge $KeepAliveMinutes) {
+        # keep-alive refresh while online, so the page can tell the host is still alive
+        $shouldPush = $true
+        Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $remoteAgeMinutes)
     }
 }
 
