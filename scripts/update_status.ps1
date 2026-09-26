@@ -51,6 +51,7 @@ param(
     [switch]$Force,
     [switch]$DryRun,
     [switch]$SelfTest,
+    [switch]$TunnelOnly,
     [switch]$Watch,
     [int]$WatchFastSeconds = 5,
     [int]$WatchIdleSeconds = 10
@@ -626,7 +627,7 @@ function Update-TunnelStatus {
 
     $list = $null
     try {
-        $list = Invoke-RestMethod -Uri 'https://api.natfrp.com/v4/tunnels' -Method Get -TimeoutSec 20 -Headers @{
+        $list = Invoke-RestMethod -Uri 'https://api.natfrp.com/v4/tunnels' -Method Get -TimeoutSec 60 -Headers @{
             Authorization = "Bearer $($script:TunnelToken)"
             'User-Agent'  = 'mc-server-status-watcher'
             Accept        = 'application/json'
@@ -650,7 +651,7 @@ function Update-TunnelStatus {
     if ($script:LastTunnelPush -ne [datetime]::MinValue) {
         $ageMinutes = ((Get-Date) - $script:LastTunnelPush).TotalMinutes
     }
-    if ($script:LastTunnelStateKey -eq $stateKey -and $ageMinutes -lt $TunnelKeepAliveMinutes) { return }
+    if (-not $ForceCheck -and $script:LastTunnelStateKey -eq $stateKey -and $ageMinutes -lt $TunnelKeepAliveMinutes) { return }
 
     $payload = [ordered]@{
         online        = $online
@@ -671,6 +672,15 @@ function Update-TunnelStatus {
 }
 
 # ------------------------------------------------------------------- main flow
+if ($TunnelOnly) {
+    if (-not $script:TunnelToken -or -not $script:TunnelSelector) {
+        Write-Log 'Tunnel check skipped: natfrpTunnel / natfrpTokenFile not configured, or the token file is missing.'
+        exit 2
+    }
+    Update-TunnelStatus -ForceCheck
+    exit 0
+}
+
 if ($Watch) {
     # single instance: the watchdog task may launch us while we are already running
     $mutex = New-Object System.Threading.Mutex($false, 'Local\MC-Server-Status-Watch')
