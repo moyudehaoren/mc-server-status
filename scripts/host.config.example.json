@@ -7,5 +7,6 @@
   "serverPort": 25565,
   "protocolVersion": 767,
   "timeoutMs": 3000,
-  "keepAliveMinutes": 10
+  "keepAliveMinutes": 10,
+  "minPushIntervalMinutes": 2
 }
