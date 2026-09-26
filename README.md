@@ -1,6 +1,7 @@
 # mc-server-status · Minecraft 开服状态页
 
-一个纯静态的 GitHub Pages 页面，实时显示**我现在是否开服**：开关状态、在线人数、玩家名。
+一个纯静态的 GitHub Pages 页面，实时显示**我现在是否开服**：开关状态、在线人数、玩家名；
+左侧还有一块**主机面板**：电脑是否开机、CPU / 内存占用、开机时长。
 
 > 玩法背景：第三方启动器 + 离线模式 + 局域网联机 + 樱花穿透（SakuraFrp）。
 > 这个项目只做一件事——把"我开服了没有"这件事自动发布到网页上。
@@ -14,6 +15,19 @@ https://<用户名>.github.io/mc-server-status/
 ![开服中的页面](docs/preview-online.png)
 
 <sub>↑ 开服时的样子（用本地演示数据渲染，`node tools/demo-data.js online` 可复现）</sub>
+
+## 左侧"我的电脑"面板
+
+| 显示 | 含义 |
+|---|---|
+| 🟢 已开机 / 已开机 · 游戏中 | 心跳正常，电脑开着（游戏中会自动带"游戏中"） |
+| 🔴 已关机 / 失联 | 超过阈值没收到心跳（游戏中 15 分钟、游戏没开时 40 分钟） |
+| CPU / 内存 进度条 | 绿 <70%、黄 70–90%、红 >90% |
+| 内存 x / y GB | 已用 / 总容量 |
+| 开机时长 | 系统上次启动至今 |
+
+数据由心跳脚本用 Windows CIM 采集（`Win32_OperatingSystem` 取内存与开机时间、
+`Win32_PerfFormattedData_PerfOS_Processor` 取 CPU），纯本地读取，不装任何东西。
 
 ## 页面状态说明
 
@@ -139,14 +153,16 @@ mc-server-status/
 | `-ProtocolVersion` | `767` | 握手用的协议号，一般不用改 |
 | `-KeepAliveMinutes` | `10` | 在线期间最长多久刷新一次（防止刷提交） |
 | `-MinPushIntervalMinutes` | `2` | 仅"玩家列表变化"时的最小推送间隔；开服/关服不受此限制，`0` = 不节流 |
+| `-MachineKeepAliveMinutes` | `30` | 游戏**没开**时也定期上报一次（让电脑面板不显示旧数据；不想上报设很大值） |
 | `-ConfigPath` / `-LogFile` | `scripts/host.config.json` / `scripts/heartbeat.log` | 配置与日志路径 |
 
 ## 上报节流规则（为什么不会刷屏提交）
 
 - 状态**变化**时立即上报（开服 / 关服 / 玩家进出）
 - 在线期间：距上次上报超过 `KeepAliveMinutes`（默认 10 分钟）才再报一次
-- 离线且远端已是离线：**完全不上报**（挂机时不产生任何提交）
-- 隧道侧同理：状态没变化时最多每 30 分钟写一次 `tunnel.json`
+- 游戏**没开**时：每 `MachineKeepAliveMinutes`（默认 30 分钟）上报一次，让电脑面板保持新鲜
+  （电脑关掉后心跳就停了，页面按上面阈值显示"已关机 / 失联"）
+- 隧道侧：状态没变化时最多每 30 分钟写一次 `tunnel.json`
 
 > ⚠️ 页面上的"数据过期"阈值（`index.html` 里的 `HEARTBEAT_STALE_MINUTES`，默认 **15 分钟**）
 > 必须**明显大于** `KeepAliveMinutes`（默认 10 分钟），否则游戏中页面会误报"主机失联"。

@@ -19,6 +19,15 @@ const old = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // 一小时前
 const statusFile = path.join(root, 'status.json');
 const tunnelFile = path.join(root, 'tunnel.json');
 
+// 演示用的机器数据（真实数据由心跳脚本用 CIM 采集）
+const machine = {
+  cpu_percent: 23.5,
+  mem_percent: 61.2,
+  mem_used_gb: 9.6,
+  mem_total_gb: 15.6,
+  uptime_minutes: 248.3
+};
+
 function write(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 }
@@ -26,7 +35,7 @@ function write(file, data) {
 if (mode === 'offline') {
   write(statusFile, {
     online: false, players: [], count: 0, max: null,
-    version: null, updated_at: now, source: 'demo'
+    version: null, updated_at: now, source: 'demo', machine
   });
   write(tunnelFile, {
     online: false, status: null, status_reason: null,
@@ -36,7 +45,7 @@ if (mode === 'offline') {
 } else if (mode === 'stale') {
   write(statusFile, {
     online: true, players: ['Steve', 'Alex'], count: 2, max: 20,
-    version: '1.21.4', updated_at: old, source: 'demo'
+    version: '1.21.4', updated_at: old, source: 'demo', machine
   });
   write(tunnelFile, {
     online: false, status: null, status_reason: null,
@@ -46,7 +55,7 @@ if (mode === 'offline') {
 } else {
   write(statusFile, {
     online: true, players: ['Steve', 'Alex', 'Notch'], count: 3, max: 20,
-    version: '1.21.4', updated_at: now, source: 'demo'
+    version: '1.21.4', updated_at: now, source: 'demo', machine
   });
   write(tunnelFile, {
     online: true, status: 0, status_reason: null,

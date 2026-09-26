@@ -36,6 +36,7 @@ param(
     [int]$TimeoutMs,
     [int]$KeepAliveMinutes,
     [int]$MinPushIntervalMinutes = -1,
+    [int]$MachineKeepAliveMinutes = -1,
     [string]$ConfigPath,
     [string]$LogFile,
     [switch]$Force,
@@ -89,6 +90,12 @@ if ($MinPushIntervalMinutes -lt 0) {
     $cfgMinPush = Get-CfgValue 'minPushIntervalMinutes'
     if ($null -ne $cfgMinPush -and "$cfgMinPush" -ne '') { $MinPushIntervalMinutes = [int]$cfgMinPush }
     if ($MinPushIntervalMinutes -lt 0) { $MinPushIntervalMinutes = 2 }
+}
+# host keep-alive while the game is closed: keeps the "PC on / CPU / RAM" panel from going stale
+if ($MachineKeepAliveMinutes -lt 0) {
+    $cfgMachine = Get-CfgValue 'machineKeepAliveMinutes'
+    if ($null -ne $cfgMachine -and "$cfgMachine" -ne '') { $MachineKeepAliveMinutes = [int]$cfgMachine }
+    if ($MachineKeepAliveMinutes -lt 0) { $MachineKeepAliveMinutes = 30 }
 }
 
 # ------------------------------------------------------------------- logging
@@ -237,6 +244,47 @@ function Get-MinecraftStatus {
     }
 }
 
+function Get-MachineStats {
+    $stats = [ordered]@{}
+
+    # memory + uptime (Win32_OperatingSystem property names are locale independent)
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $totalKb = [double]$os.TotalVisibleMemorySize
+        $freeKb = [double]$os.FreePhysicalMemory
+        if ($totalKb -gt 0) {
+            $usedKb = $totalKb - $freeKb
+            $stats.mem_percent = [math]::Round(($usedKb / $totalKb) * 100, 1)
+            $stats.mem_used_gb = [math]::Round($usedKb / 1MB, 1)
+            $stats.mem_total_gb = [math]::Round($totalKb / 1MB, 1)
+        }
+        if ($os.LastBootUpTime) {
+            $stats.uptime_minutes = [math]::Round(((Get-Date) - $os.LastBootUpTime).TotalMinutes, 1)
+        }
+    } catch { }
+
+    # cpu load: performance class first, Win32_Processor as fallback
+    try {
+        $perf = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Processor -ErrorAction Stop |
+            Where-Object { $_.Name -eq '_Total' } | Select-Object -First 1
+        if ($perf -and $null -ne $perf.PercentProcessorTime) {
+            $stats.cpu_percent = [int]$perf.PercentProcessorTime
+        }
+    } catch { }
+    if (-not $stats.Contains('cpu_percent')) {
+        try {
+            $loads = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop |
+                Where-Object { $null -ne $_.LoadPercentage } | ForEach-Object { [int]$_.LoadPercentage })
+            if ($loads.Count -gt 0) {
+                $stats.cpu_percent = [int](($loads | Measure-Object -Average).Average)
+            }
+        } catch { }
+    }
+
+    if ($stats.Count -eq 0) { return $null }
+    return [pscustomobject]$stats
+}
+
 # ----------------------------------------------------------------- self test
 function Invoke-SelfTest {
     $failures = @()
@@ -321,6 +369,7 @@ if ($SelfTest) { exit (Invoke-SelfTest) }
 # ----------------------------------------------------------------- main flow
 $status = $null
 $result = Get-MinecraftStatus -TargetHost $ServerHost -Port $ServerPort -TimeoutMs $TimeoutMs -ProtocolVersion $ProtocolVersion
+$machine = Get-MachineStats
 $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 
 if ($result.Reachable) {
@@ -332,6 +381,7 @@ if ($result.Reachable) {
         version    = $result.Version
         updated_at = $now
         source     = 'host-heartbeat'
+        machine    = $machine
     }
     Write-Log ("Server is UP at {0}:{1} - {2}/{3} player(s) [{4}] version {5}" -f `
         $ServerHost, $ServerPort, $result.Online, $result.Max, ($result.Players -join ', '), $result.Version)
@@ -344,8 +394,16 @@ if ($result.Reachable) {
         version    = $null
         updated_at = $now
         source     = 'host-heartbeat'
+        machine    = $machine
     }
     Write-Log ("Server is DOWN at {0}:{1} - {2}" -f $ServerHost, $ServerPort, $result.Reason)
+}
+
+if ($machine) {
+    Write-Log ("Host: CPU {0}% MEM {1}% ({2}/{3} GB) uptime {4} min" -f `
+        $machine.cpu_percent, $machine.mem_percent, $machine.mem_used_gb, $machine.mem_total_gb, $machine.uptime_minutes)
+} else {
+    Write-Log 'Host: machine stats unavailable'
 }
 
 $json = ($status | ConvertTo-Json -Depth 4) + "`n"
@@ -411,6 +469,10 @@ if (-not $shouldPush) {
         # keep-alive refresh while online, so the page can tell the host is still alive
         $shouldPush = $true
         Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $remoteAgeMinutes)
+    } elseif ($status.online -eq $false -and $remoteAgeMinutes -ge $MachineKeepAliveMinutes) {
+        # host keep-alive while the game is closed: keeps the PC/CPU/RAM panel on the page fresh
+        $shouldPush = $true
+        Write-Log ("Host keep-alive while offline (last update {0:N1} min ago)." -f $remoteAgeMinutes)
     }
 }
 

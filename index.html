@@ -90,6 +90,38 @@
   .row .val.unknown { color: var(--gray); }
   .row .time { margin-left: auto; color: var(--muted); font-size: 12px; }
 
+  /* ── 双栏布局：左边电脑状态，右边开服状态 ── */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 280px) minmax(0, 560px);
+    gap: 20px;
+    align-items: start;
+    width: 100%;
+    justify-content: center;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 560px); }
+  }
+
+  .pc-card h2 { margin: 0 0 14px; font-size: 16px; font-weight: 600; letter-spacing: .5px; }
+  .pc-status {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px; border-radius: 12px;
+    background: #12151b; border: 1px solid var(--line);
+  }
+  .pc-status .text { font-size: 16px; font-weight: 600; }
+  .dot.small { width: 12px; height: 12px; }
+
+  .metric { margin-top: 16px; }
+  .metric-head { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; color: var(--muted); }
+  .metric-head .value { color: var(--text); font-weight: 600; }
+  .bar { height: 6px; border-radius: 3px; background: #222833; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--green); border-radius: 3px; transition: width .4s ease; }
+  .bar > i.warn { background: var(--yellow); }
+  .bar > i.high { background: var(--red); }
+  .metric-sub { margin-top: 5px; color: var(--muted); font-size: 12px; }
+  .pc-rows { margin-top: 18px; border-top: 1px solid var(--line); }
+
   footer {
     display: flex; justify-content: space-between; gap: 12px;
     margin-top: 16px; color: var(--muted); font-size: 12px;
@@ -98,6 +130,39 @@
 </style>
 </head>
 <body>
+<div class="layout">
+
+<aside class="card pc-card">
+  <h2>我的电脑</h2>
+
+  <div class="pc-status">
+    <span class="dot small unknown" id="pcDot"></span>
+    <span class="text" id="pcStatus">读取中</span>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head"><span>CPU 占用</span><span class="value" id="cpuValue">–</span></div>
+    <div class="bar"><i id="cpuBar"></i></div>
+  </div>
+
+  <div class="metric">
+    <div class="metric-head"><span>内存占用</span><span class="value" id="memValue">–</span></div>
+    <div class="bar"><i id="memBar"></i></div>
+    <div class="metric-sub" id="memSub">无数据</div>
+  </div>
+
+  <div class="rows pc-rows">
+    <div class="row">
+      <span class="label">开机时长</span>
+      <span class="time" id="uptimeValue">–</span>
+    </div>
+    <div class="row">
+      <span class="label">上报时间</span>
+      <span class="time" id="pcUpdated">–</span>
+    </div>
+  </div>
+</aside>
+
 <main class="card">
   <h1>Minecraft 开服状态</h1>
   <p class="sub" id="subtitle">正在读取状态…</p>
@@ -131,6 +196,7 @@
     <span id="lastRefresh"></span>
   </footer>
 </main>
+</div>
 
 <script>
 // ── 可调参数 ────────────────────────────────────────────────────────────────
@@ -242,7 +308,72 @@ function render(game, tunnel) {
   document.getElementById('tunnelTime').textContent =
     tunnel.status_reason ? tTime + ' · ' + tunnel.status_reason : tTime;
 
+  renderPc(game);
   document.getElementById('lastRefresh').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+}
+
+// ── 左侧面板：电脑状态 ──────────────────────────────────────────────────────
+// 心跳脚本在游戏在线时每 10 分钟刷新一次，离线时每 30 分钟刷新一次
+// （对应 host.config.json 的 keepAliveMinutes / machineKeepAliveMinutes）
+const PC_STALE_ONLINE_MINUTES = 15;   // 游戏中：超过 15 分钟没上报 → 判定关机/失联
+const PC_STALE_OFFLINE_MINUTES = 40;  // 游戏没开：离线心跳 30 分钟一次，留 10 分钟余量
+
+function applyMetric(barId, valueId, percent) {
+  const bar = document.getElementById(barId);
+  const val = document.getElementById(valueId);
+  if (typeof percent !== 'number' || !Number.isFinite(percent)) {
+    bar.style.width = '0%';
+    bar.className = '';
+    val.textContent = '–';
+    return;
+  }
+  const p = Math.max(0, Math.min(100, percent));
+  bar.style.width = p + '%';
+  bar.className = p >= 90 ? 'high' : (p >= 70 ? 'warn' : '');
+  val.textContent = Math.round(p) + '%';
+}
+
+function formatUptime(minutes) {
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes < 0) return '–';
+  const d = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
+  const m = Math.floor(minutes % 60);
+  if (d > 0) return d + ' 天 ' + h + ' 小时';
+  if (h > 0) return h + ' 小时 ' + m + ' 分';
+  return m + ' 分钟';
+}
+
+function renderPc(game) {
+  const online = game.online === true;
+  const age = ageMinutes(game.updated_at);
+  const limit = online ? PC_STALE_ONLINE_MINUTES : PC_STALE_OFFLINE_MINUTES;
+  const fresh = age !== null && age <= limit;
+
+  const dot = document.getElementById('pcDot');
+  const statusText = document.getElementById('pcStatus');
+  if (!game.updated_at) {
+    dot.className = 'dot small unknown';
+    statusText.textContent = '未知';
+  } else if (fresh) {
+    dot.className = 'dot small on';
+    statusText.textContent = online ? '已开机 · 游戏中' : '已开机';
+  } else {
+    dot.className = 'dot small off';
+    statusText.textContent = '已关机 / 失联';
+  }
+
+  const m = game.machine || {};
+  const hasMachine = fresh && !!game.machine;
+  applyMetric('cpuBar', 'cpuValue', hasMachine ? m.cpu_percent : null);
+  applyMetric('memBar', 'memValue', hasMachine ? m.mem_percent : null);
+
+  document.getElementById('memSub').textContent =
+    hasMachine && typeof m.mem_used_gb === 'number' && typeof m.mem_total_gb === 'number'
+      ? m.mem_used_gb + ' / ' + m.mem_total_gb + ' GB'
+      : '无数据';
+
+  document.getElementById('uptimeValue').textContent = hasMachine ? formatUptime(m.uptime_minutes) : '–';
+  document.getElementById('pcUpdated').textContent = humanAge(game.updated_at);
 }
 
 function tunnelKnown(tunnel) {

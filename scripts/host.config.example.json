@@ -8,5 +8,6 @@
   "protocolVersion": 767,
   "timeoutMs": 3000,
   "keepAliveMinutes": 10,
-  "minPushIntervalMinutes": 2
+  "minPushIntervalMinutes": 2,
+  "machineKeepAliveMinutes": 30
 }
