@@ -3,6 +3,7 @@ scripts/host.config.json
 scripts/*.log
 scripts/watcher-alive.txt
 scripts/watch-*.txt
+scripts/w-*.txt
 *.log
 
 # 临时 / 依赖

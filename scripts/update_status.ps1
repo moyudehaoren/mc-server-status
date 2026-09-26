@@ -411,7 +411,7 @@ $script:RemoteLoaded     = $false
 $script:RemoteOnline     = $null
 $script:RemoteKey        = $null
 $script:RemoteSha        = $null
-$script:RemoteAgeMinutes = [double]::MaxValue
+$script:RemoteUpdatedAt  = [datetime]::MinValue
 $script:LastPushAttempt  = [datetime]::MinValue
 $script:LastPushFailed   = $false
 $script:LastCycleOnline  = $null
@@ -438,10 +438,10 @@ function Read-RemoteStatus {
         $script:RemoteOnline = [bool]$remote.online
         $script:RemoteKey = '{0}|{1}' -f $remote.online, ((@($remote.players)) -join ',')
         $script:RemoteSha = $raw.sha
-        $script:RemoteAgeMinutes = [double]::MaxValue
+        $script:RemoteUpdatedAt = [datetime]::MinValue
         if ($remote.updated_at) {
             try {
-                $script:RemoteAgeMinutes = ((Get-Date).ToUniversalTime() - [datetime]::Parse($remote.updated_at).ToUniversalTime()).TotalMinutes
+                $script:RemoteUpdatedAt = [datetime]::Parse($remote.updated_at).ToUniversalTime()
             } catch { }
         }
     } catch {
@@ -449,7 +449,7 @@ function Read-RemoteStatus {
         $script:RemoteOnline = $null
         $script:RemoteKey = $null
         $script:RemoteSha = $null
-        $script:RemoteAgeMinutes = [double]::MaxValue
+        $script:RemoteUpdatedAt = [datetime]::MinValue
     }
     $script:RemoteLoaded = $true
 }
@@ -524,6 +524,14 @@ function Invoke-HeartbeatCycle {
     $shouldPush = [bool]($Force -or $ForcePush)
 
     if (-not $shouldPush) {
+        # The age MUST be computed fresh on every cycle: a value cached when the
+        # remote copy was read never grows, so the keep-alive rules below would
+        # never fire again and the page would go stale while it is up.
+        $remoteAgeMinutes = [double]::MaxValue
+        if ($script:RemoteUpdatedAt -ne [datetime]::MinValue) {
+            $remoteAgeMinutes = ((Get-Date).ToUniversalTime() - $script:RemoteUpdatedAt).TotalMinutes
+        }
+
         if ($null -eq $script:RemoteKey) {
             $shouldPush = $true
         } elseif ($script:RemoteOnline -ne $status.online) {
@@ -532,20 +540,20 @@ function Invoke-HeartbeatCycle {
             Write-Log 'Online state changed, publishing.'
         } elseif ($script:RemoteKey -ne $stateKey) {
             # only the player list changed: throttle to avoid commit spam (Pages has a build rate limit)
-            if ($MinPushIntervalMinutes -le 0 -or $script:RemoteAgeMinutes -ge $MinPushIntervalMinutes) {
+            if ($MinPushIntervalMinutes -le 0 -or $remoteAgeMinutes -ge $MinPushIntervalMinutes) {
                 $shouldPush = $true
                 Write-Log 'Player list changed, publishing.'
             } else {
-                Write-Log ("Player list changed but last push was {0:N1} min ago (< {1} min), holding off." -f $script:RemoteAgeMinutes, $MinPushIntervalMinutes)
+                Write-Log ("Player list changed but last push was {0:N1} min ago (< {1} min), holding off." -f $remoteAgeMinutes, $MinPushIntervalMinutes)
             }
-        } elseif ($status.online -eq $true -and $script:RemoteAgeMinutes -ge $KeepAliveMinutes) {
+        } elseif ($status.online -eq $true -and $remoteAgeMinutes -ge $KeepAliveMinutes) {
             # keep-alive refresh while online, so the page can tell the host is still alive
             $shouldPush = $true
-            Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $script:RemoteAgeMinutes)
-        } elseif ($status.online -eq $false -and $script:RemoteAgeMinutes -ge $MachineKeepAliveMinutes) {
+            Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $remoteAgeMinutes)
+        } elseif ($status.online -eq $false -and $remoteAgeMinutes -ge $MachineKeepAliveMinutes) {
             # host keep-alive while the game is closed: keeps the PC/CPU/RAM panel on the page fresh
             $shouldPush = $true
-            Write-Log ("Host keep-alive while offline (last update {0:N1} min ago)." -f $script:RemoteAgeMinutes)
+            Write-Log ("Host keep-alive while offline (last update {0:N1} min ago)." -f $remoteAgeMinutes)
         }
     }
 
@@ -583,6 +591,7 @@ function Invoke-HeartbeatCycle {
             $shaShort = if ($response.commit.sha) { $response.commit.sha.Substring(0, 7) } else { '?' }
             Write-Log "Published status.json (commit $shaShort)."
             $script:LastPushFailed = $false
+            $script:RemoteUpdatedAt = (Get-Date).ToUniversalTime()
             $script:RemoteLoaded = $false    # re-read the remote copy before the next publish
             return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $true; Error = $null }
         } catch {
@@ -682,18 +691,28 @@ function Write-AliveStamp {
         $now = Get-Date
         if (-not $Force -and $script:LastAliveWrite -ne [datetime]::MinValue -and
             ($now - $script:LastAliveWrite).TotalSeconds -lt 30) { return }
-        Set-Content -LiteralPath $script:AliveFile -Value $now.ToString('o') -Encoding ASCII
+        Set-Content -LiteralPath $script:AliveFile -Value ($now.ToString('o') + '|' + $PID) -Encoding ASCII
         $script:LastAliveWrite = $now
     } catch { }
 }
 
-function Get-AliveAgeMinutes {
+function Get-AliveInfo {
+    # Age of the alive stamp plus the PID it recorded, so a takeover can kill a
+    # hung watcher directly without querying WMI (which can hang as well).
     try {
-        if (-not (Test-Path -LiteralPath $script:AliveFile)) { return [double]::MaxValue }
-        $stamp = (Get-Content -LiteralPath $script:AliveFile -Raw).Trim()
-        return ((Get-Date) - [datetime]::Parse($stamp)).TotalMinutes
+        if (-not (Test-Path -LiteralPath $script:AliveFile)) {
+            return [pscustomobject]@{ AgeMinutes = [double]::MaxValue; ProcessId = $null }
+        }
+        $raw = (Get-Content -LiteralPath $script:AliveFile -Raw).Trim()
+        $parts = $raw -split '\|'
+        $procId = $null
+        if ($parts.Count -gt 1) { $procId = [int]$parts[1] }
+        return [pscustomobject]@{
+            AgeMinutes = ((Get-Date) - [datetime]::Parse($parts[0])).TotalMinutes
+            ProcessId  = $procId
+        }
     } catch {
-        return [double]::MaxValue
+        return [pscustomobject]@{ AgeMinutes = [double]::MaxValue; ProcessId = $null }
     }
 }
 
@@ -713,21 +732,17 @@ if ($Watch) {
     # its alive file, so in that case take over instead of dying behind the lock.
     $mutex = New-Object System.Threading.Mutex($false, 'Local\MC-Server-Status-Watch')
     if (-not $mutex.WaitOne(0)) {
-        $aliveAge = Get-AliveAgeMinutes
-        if ($aliveAge -lt $WatchStaleMinutes) {
-            Write-Log ("Another watcher is running (alive {0:N1} min ago) - exiting." -f $aliveAge)
+        $alive = Get-AliveInfo
+        if ($alive.AgeMinutes -lt $WatchStaleMinutes) {
+            Write-Log ("Another watcher is running (alive {0:N1} min ago) - exiting." -f $alive.AgeMinutes)
             exit 0
         }
-        Write-Log ("Running watcher looks hung (no alive stamp for {0:N1} min) - taking over." -f $aliveAge)
-        try {
-            Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -OperationTimeoutSec 15 -ErrorAction Stop |
-                Where-Object { $_.CommandLine -and $_.CommandLine -like '*update_status.ps1*' -and $_.ProcessId -ne $PID } |
-                ForEach-Object {
-                    Write-Log ("Killing hung watcher PID {0}." -f $_.ProcessId)
-                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-                }
-        } catch {
-            Write-Log ("Could not enumerate the hung watcher: {0}" -f $_.Exception.Message)
+        Write-Log ("Running watcher looks hung (no alive stamp for {0:N1} min) - taking over." -f $alive.AgeMinutes)
+        if ($alive.ProcessId -and $alive.ProcessId -ne $PID) {
+            Write-Log ("Killing hung watcher PID {0}." -f $alive.ProcessId)
+            Stop-Process -Id $alive.ProcessId -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Log 'No PID recorded in the alive stamp - cannot kill the hung watcher directly.'
         }
         Start-Sleep -Seconds 3
         if (-not $mutex.WaitOne(5000)) {
