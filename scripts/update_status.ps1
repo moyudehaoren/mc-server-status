@@ -20,6 +20,13 @@
     Only ping the server and print the JSON that would be published. Never
     contacts GitHub, so it is safe to run for testing.
 
+.PARAMETER Watch
+    Resident mode: keep probing in-process and publish on change/schedule,
+    instead of running once per scheduled task. Started hidden at logon (see
+    scripts/run-hidden.vbs) with a low-frequency scheduled task acting as a
+    watchdog. Uses adaptive intervals: WatchFastSeconds while the server is up,
+    WatchIdleSeconds while it is down. A named mutex keeps a single instance.
+
 .EXAMPLE
     .\update_status.ps1 -DryRun
     .\update_status.ps1 -Owner alice -Repo mc-server-status -Token $env:MC_STATUS_TOKEN
@@ -41,7 +48,10 @@ param(
     [string]$LogFile,
     [switch]$Force,
     [switch]$DryRun,
-    [switch]$SelfTest
+    [switch]$SelfTest,
+    [switch]$Watch,
+    [int]$WatchFastSeconds = 5,
+    [int]$WatchIdleSeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -366,58 +376,17 @@ function Invoke-SelfTest {
 
 if ($SelfTest) { exit (Invoke-SelfTest) }
 
-# ----------------------------------------------------------------- main flow
-$status = $null
-$result = Get-MinecraftStatus -TargetHost $ServerHost -Port $ServerPort -TimeoutMs $TimeoutMs -ProtocolVersion $ProtocolVersion
-$machine = Get-MachineStats
-$now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-
-if ($result.Reachable) {
-    $status = [ordered]@{
-        online     = $true
-        players    = @($result.Players)
-        count      = $result.Online
-        max        = $result.Max
-        version    = $result.Version
-        updated_at = $now
-        source     = 'host-heartbeat'
-        machine    = $machine
-    }
-    Write-Log ("Server is UP at {0}:{1} - {2}/{3} player(s) [{4}] version {5}" -f `
-        $ServerHost, $ServerPort, $result.Online, $result.Max, ($result.Players -join ', '), $result.Version)
-} else {
-    $status = [ordered]@{
-        online     = $false
-        players    = @()
-        count      = 0
-        max        = $null
-        version    = $null
-        updated_at = $now
-        source     = 'host-heartbeat'
-        machine    = $machine
-    }
-    Write-Log ("Server is DOWN at {0}:{1} - {2}" -f $ServerHost, $ServerPort, $result.Reason)
-}
-
-if ($machine) {
-    Write-Log ("Host: CPU {0}% MEM {1}% ({2}/{3} GB) uptime {4} min" -f `
-        $machine.cpu_percent, $machine.mem_percent, $machine.mem_used_gb, $machine.mem_total_gb, $machine.uptime_minutes)
-} else {
-    Write-Log 'Host: machine stats unavailable'
-}
-
-$json = ($status | ConvertTo-Json -Depth 4) + "`n"
-
-if ($DryRun) {
-    Write-Log '--- DryRun: this JSON would be published as status.json ---'
-    Write-Host $json
-    exit 0
-}
-
-if (-not $Owner -or -not $Repo -or -not $Token) {
-    Write-Log 'ERROR: Owner / Repo / Token missing. Copy scripts/host.config.example.json to host.config.json and fill it in, or pass -Owner and -Token.'
-    exit 2
-}
+# ------------------------------------------------------------------ heartbeat
+# In-memory view of the published status.json, so watch mode does not need a
+# GitHub GET on every probe - only right before an actual publish.
+$script:RemoteLoaded     = $false
+$script:RemoteOnline     = $null
+$script:RemoteKey        = $null
+$script:RemoteSha        = $null
+$script:RemoteAgeMinutes = [double]::MaxValue
+$script:LastPushAttempt  = [datetime]::MinValue
+$script:LastPushFailed   = $false
+$script:LastCycleOnline  = $null
 
 $headers = @{
     Authorization = "Bearer $Token"
@@ -426,80 +395,207 @@ $headers = @{
 }
 $contentsUri = "https://api.github.com/repos/$Owner/$Repo/contents/status.json"
 
-# --- read current remote state ---
-$remote = $null
-$remoteSha = $null
-try {
-    $remoteRaw = Invoke-RestMethod -Uri "$contentsUri`?ref=$Branch" -Headers $headers -Method Get
-    $remoteText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($remoteRaw.content -replace '\s', '')))
-    $remote = $remoteText | ConvertFrom-Json
-    $remoteSha = $remoteRaw.sha
-} catch {
-    Write-Log "No readable status.json on GitHub yet ($($_.Exception.Message))"
-}
-
-# --- decide whether to push ---
-$stateKey = '{0}|{1}' -f $status.online, ($status.players -join ',')
-$shouldPush = [bool]$Force
-
-if (-not $shouldPush -and $null -eq $remote) { $shouldPush = $true }
-
-if (-not $shouldPush) {
-    $remoteKey = '{0}|{1}' -f $remote.online, ((@($remote.players)) -join ',')
-    $remoteAgeMinutes = [double]::MaxValue
-    if ($remote.updated_at) {
-        try {
-            $remoteAgeMinutes = ((Get-Date).ToUniversalTime() - [datetime]::Parse($remote.updated_at).ToUniversalTime()).TotalMinutes
-        } catch { }
-    }
-
-    if ($remote.online -ne $status.online) {
-        # online/offline transition: publish immediately
-        $shouldPush = $true
-        Write-Log 'Online state changed, publishing.'
-    } elseif ($remoteKey -ne $stateKey) {
-        # only the player list changed: throttle to avoid commit spam (Pages has a build rate limit)
-        if ($MinPushIntervalMinutes -le 0 -or $remoteAgeMinutes -ge $MinPushIntervalMinutes) {
-            $shouldPush = $true
-            Write-Log 'Player list changed, publishing.'
-        } else {
-            Write-Log ("Player list changed but last push was {0:N1} min ago (< {1} min), holding off." -f $remoteAgeMinutes, $MinPushIntervalMinutes)
+function Read-RemoteStatus {
+    param([switch]$Force)
+    if ($script:RemoteLoaded -and -not $Force) { return }
+    try {
+        $raw = Invoke-RestMethod -Uri "$contentsUri`?ref=$Branch" -Headers $headers -Method Get
+        $text = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($raw.content -replace '\s', '')))
+        $remote = $text | ConvertFrom-Json
+        $script:RemoteOnline = [bool]$remote.online
+        $script:RemoteKey = '{0}|{1}' -f $remote.online, ((@($remote.players)) -join ',')
+        $script:RemoteSha = $raw.sha
+        $script:RemoteAgeMinutes = [double]::MaxValue
+        if ($remote.updated_at) {
+            try {
+                $script:RemoteAgeMinutes = ((Get-Date).ToUniversalTime() - [datetime]::Parse($remote.updated_at).ToUniversalTime()).TotalMinutes
+            } catch { }
         }
-    } elseif ($status.online -eq $true -and $remoteAgeMinutes -ge $KeepAliveMinutes) {
-        # keep-alive refresh while online, so the page can tell the host is still alive
-        $shouldPush = $true
-        Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $remoteAgeMinutes)
-    } elseif ($status.online -eq $false -and $remoteAgeMinutes -ge $MachineKeepAliveMinutes) {
-        # host keep-alive while the game is closed: keeps the PC/CPU/RAM panel on the page fresh
-        $shouldPush = $true
-        Write-Log ("Host keep-alive while offline (last update {0:N1} min ago)." -f $remoteAgeMinutes)
+    } catch {
+        Write-Log "No readable status.json on GitHub yet ($($_.Exception.Message))"
+        $script:RemoteOnline = $null
+        $script:RemoteKey = $null
+        $script:RemoteSha = $null
+        $script:RemoteAgeMinutes = [double]::MaxValue
     }
+    $script:RemoteLoaded = $true
 }
 
-if (-not $shouldPush) {
-    Write-Log 'State unchanged and still fresh - nothing to publish.'
+function Format-HostStats {
+    param($Machine)
+    if (-not $Machine) { return 'Host: machine stats unavailable' }
+    return ("Host: CPU {0}% MEM {1}% ({2}/{3} GB) uptime {4} min" -f `
+        $Machine.cpu_percent, $Machine.mem_percent, $Machine.mem_used_gb, $Machine.mem_total_gb, $Machine.uptime_minutes)
+}
+
+function Invoke-HeartbeatCycle {
+    param([switch]$ForcePush)
+
+    $result = Get-MinecraftStatus -TargetHost $ServerHost -Port $ServerPort -TimeoutMs $TimeoutMs -ProtocolVersion $ProtocolVersion
+    $now = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+    # watch mode only logs state transitions, otherwise the log grows fast
+    $verbose = (-not $Watch) -or ($script:LastCycleOnline -ne $result.Reachable)
+    $script:LastCycleOnline = $result.Reachable
+
+    if ($result.Reachable) {
+        $status = [ordered]@{
+            online     = $true
+            players    = @($result.Players)
+            count      = $result.Online
+            max        = $result.Max
+            version    = $result.Version
+            updated_at = $now
+            source     = 'host-heartbeat'
+        }
+        if ($verbose) {
+            Write-Log ("Server is UP at {0}:{1} - {2}/{3} player(s) [{4}] version {5}" -f `
+                $ServerHost, $ServerPort, $result.Online, $result.Max, ($result.Players -join ', '), $result.Version)
+        }
+    } else {
+        $status = [ordered]@{
+            online     = $false
+            players    = @()
+            count      = 0
+            max        = $null
+            version    = $null
+            updated_at = $now
+            source     = 'host-heartbeat'
+        }
+        if ($verbose) {
+            Write-Log ("Server is DOWN at {0}:{1} - {2}" -f $ServerHost, $ServerPort, $result.Reason)
+        }
+    }
+
+    if ($DryRun) {
+        # machine stats are sampled only when we actually publish (a few times an
+        # hour), so the resident watcher does not query WMI every few seconds
+        $status.machine = Get-MachineStats
+        Write-Log '--- DryRun: this JSON would be published as status.json ---'
+        Write-Host (($status | ConvertTo-Json -Depth 4) + "`n")
+        return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $false; Error = $null }
+    }
+
+    if (-not $Owner -or -not $Repo -or -not $Token) {
+        return [pscustomobject]@{
+            Online = [bool]$status.online
+            Pushed = $false
+            Error  = 'Owner / Repo / Token missing. Copy scripts/host.config.example.json to host.config.json and fill it in, or pass -Owner and -Token.'
+        }
+    }
+
+    # --- decide whether to publish (from the in-memory remote view) ---
+    if (-not $script:RemoteLoaded) { Read-RemoteStatus }
+
+    $stateKey = '{0}|{1}' -f $status.online, ($status.players -join ',')
+    $shouldPush = [bool]($Force -or $ForcePush)
+
+    if (-not $shouldPush) {
+        if ($null -eq $script:RemoteKey) {
+            $shouldPush = $true
+        } elseif ($script:RemoteOnline -ne $status.online) {
+            # online/offline transition: publish immediately
+            $shouldPush = $true
+            Write-Log 'Online state changed, publishing.'
+        } elseif ($script:RemoteKey -ne $stateKey) {
+            # only the player list changed: throttle to avoid commit spam (Pages has a build rate limit)
+            if ($MinPushIntervalMinutes -le 0 -or $script:RemoteAgeMinutes -ge $MinPushIntervalMinutes) {
+                $shouldPush = $true
+                Write-Log 'Player list changed, publishing.'
+            } else {
+                Write-Log ("Player list changed but last push was {0:N1} min ago (< {1} min), holding off." -f $script:RemoteAgeMinutes, $MinPushIntervalMinutes)
+            }
+        } elseif ($status.online -eq $true -and $script:RemoteAgeMinutes -ge $KeepAliveMinutes) {
+            # keep-alive refresh while online, so the page can tell the host is still alive
+            $shouldPush = $true
+            Write-Log ("Keep-alive refresh (last update {0:N1} min ago)." -f $script:RemoteAgeMinutes)
+        } elseif ($status.online -eq $false -and $script:RemoteAgeMinutes -ge $MachineKeepAliveMinutes) {
+            # host keep-alive while the game is closed: keeps the PC/CPU/RAM panel on the page fresh
+            $shouldPush = $true
+            Write-Log ("Host keep-alive while offline (last update {0:N1} min ago)." -f $script:RemoteAgeMinutes)
+        }
+    }
+
+    if (-not $shouldPush) {
+        if ($verbose) { Write-Log (Format-HostStats -Machine (Get-MachineStats)) }
+        if (-not $Watch) { Write-Log 'State unchanged and still fresh - nothing to publish.' }
+        return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $false; Error = $null }
+    }
+
+    # after a failure (bad token, network down, ...) back off instead of hammering GitHub
+    if ($script:LastPushFailed -and ((Get-Date) - $script:LastPushAttempt).TotalSeconds -lt 60) {
+        return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $false; Error = 'publish failed recently, backing off' }
+    }
+
+    # --- publish ---
+    $status.machine = Get-MachineStats
+    Write-Log (Format-HostStats -Machine $status.machine)
+    $json = ($status | ConvertTo-Json -Depth 4) + "`n"
+
+    $stateText = if ($status.online) { 'online' } else { 'offline' }
+    $message = "chore(status): $stateText"
+    if ($status.online -and $status.count) { $message += " ($($status.count) player)" }
+
+    $body = @{
+        message = $message
+        content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
+        branch  = $Branch
+    }
+
+    $script:LastPushAttempt = Get-Date
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        if ($script:RemoteSha) { $body['sha'] = $script:RemoteSha } else { $body.Remove('sha') }
+        try {
+            $response = Invoke-RestMethod -Uri $contentsUri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json'
+            $shaShort = if ($response.commit.sha) { $response.commit.sha.Substring(0, 7) } else { '?' }
+            Write-Log "Published status.json (commit $shaShort)."
+            $script:LastPushFailed = $false
+            $script:RemoteLoaded = $false    # re-read the remote copy before the next publish
+            return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $true; Error = $null }
+        } catch {
+            if ($attempt -eq 1) {
+                # most likely a stale sha (something else committed) - refresh and retry once
+                Write-Log ("Publish failed ({0}); refreshing remote state and retrying once." -f $_.Exception.Message)
+                $script:RemoteSha = $null
+                Read-RemoteStatus -Force
+            } else {
+                Write-Log ("ERROR: failed to publish status.json: {0}" -f $_.Exception.Message)
+                $script:LastPushFailed = $true
+                return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $false; Error = $_.Exception.Message }
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $false; Error = 'publish did not complete' }
+}
+
+# ------------------------------------------------------------------- main flow
+if ($Watch) {
+    # single instance: the watchdog task may launch us while we are already running
+    $mutex = New-Object System.Threading.Mutex($false, 'Local\MC-Server-Status-Watch')
+    if (-not $mutex.WaitOne(0)) {
+        Write-Log 'Another watcher is already running - exiting.'
+        exit 0
+    }
+    Write-Log ("Watch mode started (fast {0}s online / idle {1}s offline)." -f $WatchFastSeconds, $WatchIdleSeconds)
+    try {
+        while ($true) {
+            $cycle = Invoke-HeartbeatCycle
+            if ($cycle.Error) { Write-Log ("Cycle error: {0}" -f $cycle.Error) }
+            $wait = if ($cycle.Online) { $WatchFastSeconds } else { $WatchIdleSeconds }
+            if ($cycle.Error -and -not $cycle.Pushed) { $wait = [Math]::Max($wait, 30) }
+            Start-Sleep -Seconds $wait
+        }
+    } finally {
+        try { $mutex.ReleaseMutex() } catch { }
+        $mutex.Dispose()
+    }
     exit 0
 }
 
-# --- publish ---
-$stateText = if ($status.online) { 'online' } else { 'offline' }
-$message = "chore(status): $stateText"
-if ($status.online -and $status.count) { $message += " ($($status.count) player)" }
-
-$body = @{
-    message = $message
-    content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
-    branch  = $Branch
-}
-if ($remoteSha) { $body['sha'] = $remoteSha }
-
-try {
-    $response = Invoke-RestMethod -Uri $contentsUri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json'
-    $shaShort = if ($response.commit.sha) { $response.commit.sha.Substring(0, 7) } else { '?' }
-    Write-Log "Published status.json (commit $shaShort)."
-} catch {
-    Write-Log "ERROR: failed to publish status.json: $($_.Exception.Message)"
+$cycle = Invoke-HeartbeatCycle -ForcePush:$Force
+if ($cycle.Error) {
+    Write-Log ("ERROR: {0}" -f $cycle.Error)
     exit 1
 }
-
 exit 0

@@ -44,9 +44,10 @@ https://<用户名>.github.io/mc-server-status/
 ```
 开服电脑 (PCL2 + 固定端口局域网世界)
   │
-  ├─ scripts/update_status.ps1   每 1 分钟执行（Windows 任务计划）
-  │    ├─ 用 Minecraft 状态协议 ping 127.0.0.1:25565
-  │    │    → 拿到 在线/人数/玩家名/版本
+  ├─ 常驻监听进程（scripts/update_status.ps1 -Watch，登录时隐藏启动）
+  │    ├─ 空闲每 10 秒 / 游戏中每 5 秒 ping 127.0.0.1:25565
+  │    │    → 拿到 在线/人数/玩家名/版本，状态一变就立即上报
+  │    ├─ 采样 CPU / 内存 / 开机时长（只在真正要上报时才读，避免常驻轮询 WMI）
   │    └─ 通过 GitHub API 写 status.json（无需安装 git）
   │
 GitHub 仓库
@@ -56,6 +57,10 @@ GitHub 仓库
   │
 访问者浏览器  →  每 30 秒拉取两个 JSON，合成最终状态
 ```
+
+> 看门狗：Windows 任务计划每 30 分钟启动一次监听进程；进程内的互斥锁保证
+> 已经在跑时直接退出，挂了才会被重新拉起。启动通过 `wscript.exe` + `run-hidden.vbs`
+> 完成，**不会有任何控制台窗口闪出来**（直接用 powershell.exe 会闪）。
 
 - **status.json**：由你的电脑写入（唯一能拿到真实人数和玩家名的来源）
 - **tunnel.json**：由 GitHub Actions 写入（电脑关机时它仍在工作，用来交叉验证隧道）
@@ -69,8 +74,9 @@ mc-server-status/
 ├── status.json                     # 游戏状态（心跳脚本写入）
 ├── tunnel.json                     # 隧道状态（Actions 写入）
 ├── scripts/
-│   ├── update_status.ps1           # ★ 主机心跳脚本（含 -SelfTest 自检）
-│   ├── register-task.ps1           # 注册/卸载 Windows 定时任务
+│   ├── update_status.ps1           # ★ 主机心跳脚本（-Watch 常驻 / -SelfTest 自检）
+│   ├── run-hidden.vbs              # 无窗口启动器（wscript 拉起常驻监听）
+│   ├── register-task.ps1           # 装/卸 启动快捷方式 + 看门狗任务
 │   ├── check_tunnel.mjs            # 查询樱花 API（Actions 调用）
 │   └── host.config.example.json    # 主机配置模板（复制成 host.config.json）
 ├── tools/
@@ -118,11 +124,17 @@ mc-server-status/
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\update_status.ps1 -Force
    ```
-6. 注册定时任务（默认每 1 分钟跑一次，隐藏窗口）：
+6. 安装常驻监听 + 看门狗（**不会有窗口闪出来**）：
    ```powershell
    powershell -ExecutionPolicy Bypass -File scripts\register-task.ps1
-   # 查看状态： -Status     卸载： -Uninstall
+   # 查看状态： -Status     停止监听： -Stop     卸载： -Uninstall
    ```
+   这一步做两件事：
+   - 在**启动文件夹**放一个快捷方式 → 登录时静默拉起监听进程
+   - 注册一个**每 30 分钟**的看门狗任务 → 监听进程万一挂了就自动重启
+     （用 `-IntervalMinutes 10` 可以让恢复更快）
+
+   装好后也可以手动立刻启动一次：`Start-ScheduledTask -TaskName 'MC-Server-Status-Heartbeat'`
 7. （可选）**让 PCL2 帮忙加速**：如果你的 PCL2 版本支持"启动游戏后运行命令"（一般在 设置 → 启动选项 或版本设置里），
    填入下面这条，开游戏后状态会**立刻**变绿，而不用等下一次心跳：
    ```
@@ -154,6 +166,9 @@ mc-server-status/
 | `-KeepAliveMinutes` | `10` | 在线期间最长多久刷新一次（防止刷提交） |
 | `-MinPushIntervalMinutes` | `2` | 仅"玩家列表变化"时的最小推送间隔；开服/关服不受此限制，`0` = 不节流 |
 | `-MachineKeepAliveMinutes` | `30` | 游戏**没开**时也定期上报一次（让电脑面板不显示旧数据；不想上报设很大值） |
+| `-Watch` | — | 常驻模式：进程内循环探测，状态一变立刻上报（登录时由启动快捷方式拉起） |
+| `-WatchFastSeconds` | `5` | 常驻模式下"游戏在线"时的探测间隔 |
+| `-WatchIdleSeconds` | `10` | 常驻模式下"游戏没开"时的探测间隔 |
 | `-ConfigPath` / `-LogFile` | `scripts/host.config.json` / `scripts/heartbeat.log` | 配置与日志路径 |
 
 ## 上报节流规则（为什么不会刷屏提交）
@@ -162,6 +177,8 @@ mc-server-status/
 - 在线期间：距上次上报超过 `KeepAliveMinutes`（默认 10 分钟）才再报一次
 - 游戏**没开**时：每 `MachineKeepAliveMinutes`（默认 30 分钟）上报一次，让电脑面板保持新鲜
   （电脑关掉后心跳就停了，页面按上面阈值显示"已关机 / 失联"）
+- 探测本身很轻（一个 TCP 连接）：空闲 10 秒一次、游戏中 5 秒一次，
+  **不上报时完全不碰 GitHub API**，所以常驻进程几乎不产生流量
 - 隧道侧：状态没变化时最多每 30 分钟写一次 `tunnel.json`
 
 > ⚠️ 页面上的"数据过期"阈值（`index.html` 里的 `HEARTBEAT_STALE_MINUTES`，默认 **15 分钟**）
@@ -196,7 +213,9 @@ node tools\serve.js            # 然后浏览器打开 http://127.0.0.1:8080
 | 现象 | 原因 / 处理 |
 |---|---|
 | 页面一直"未开服" | 去 GitHub 看 `status.json` 有没有新提交；没有就运行 `-DryRun` 看能否 ping 到游戏（端口对不对、局域网是否已开放） |
-| 显示"主机失联 / 数据过期" | 心跳停了：电脑关机 / 游戏崩溃 / 计划任务被禁用。检查 `scripts\heartbeat.log` 和 `register-task.ps1 -Status` |
+| 显示"主机失联 / 数据过期" | 心跳停了：电脑关机 / 游戏崩溃 / 监听进程被停。检查 `scripts\heartbeat.log` 和 `register-task.ps1 -Status`，需要时 `Start-ScheduledTask -TaskName 'MC-Server-Status-Heartbeat'` 重新拉起 |
+| 屏幕上老是闪控制台窗口 | 已改成 `wscript.exe` + `run-hidden.vbs` 无窗口启动。如果又出现了，用 `register-task.ps1 -Status` 确认 Action 是 `wscript.exe` 而不是 `powershell.exe` |
+| 常驻监听占多少内存 | 约 100 MB（一个 PowerShell 进程）。介意的话可以 `register-task.ps1 -Stop` 停掉，并把启动快捷方式删掉，只保留低频看门狗 |
 | 隧道显示"未配置" | 没设 `NATFRP_TOKEN` / `NATFRP_TUNNEL` |
 | Actions 提交失败（403） | `Settings → Actions → General → Workflow permissions` 要选 Read and write |
 | 在线但玩家名是空的 | 服务器隐藏了玩家列表（多数公共服务器如此）。局域网世界一般能看到名字 |
