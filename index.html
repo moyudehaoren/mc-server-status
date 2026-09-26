@@ -134,8 +134,10 @@
 
 <script>
 // ── 可调参数 ────────────────────────────────────────────────────────────────
-// 游戏心跳超过该时长即视为"失联"（心跳脚本默认每 1 分钟上报一次）
-const HEARTBEAT_STALE_MINUTES = 3;
+// 游戏心跳超过该时长即视为"失联"。
+// ⚠️ 必须明显大于心跳脚本的 keepAliveMinutes（默认 10 分钟），
+//    否则游戏中会一直误报"数据过期"。
+const HEARTBEAT_STALE_MINUTES = 15;
 // 隧道检测超过该时长即视为"检测器异常"（Actions 默认每 5 分钟检测，30 分钟节流写入）
 const TUNNEL_STALE_MINUTES = 45;
 const REFRESH_MS = 30 * 1000;
