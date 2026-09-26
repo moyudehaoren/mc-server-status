@@ -108,6 +108,34 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
   const branch = repo.json.default_branch || 'main';
   console.log(`✓ 仓库可访问：${repo.json.full_name}（${repo.json.private ? '私有' : '公开'}，默认分支 ${branch}）`);
 
+  // --set-var NAME=VALUE ：设置/更新仓库 Actions 变量（非敏感值用它，敏感值用 Secrets）
+  const svIndex = args.indexOf('--set-var');
+  if (svIndex >= 0 && args[svIndex + 1]) {
+    const raw = args[svIndex + 1];
+    const eq = raw.indexOf('=');
+    if (eq <= 0) {
+      console.error('✗ --set-var 需要写成 NAME=VALUE');
+      process.exit(1);
+    }
+    const name = raw.slice(0, eq);
+    const value = raw.slice(eq + 1);
+    const varPath = `/repos/${owner}/${REPO_NAME}/actions/variables/${encodeURIComponent(name)}`;
+    let r = await api(varPath, token, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, value })
+    });
+    if (r.status === 404) {
+      r = await api(`/repos/${owner}/${REPO_NAME}/actions/variables`, token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, value })
+      });
+    }
+    if (r.ok) console.log(`✓ 仓库变量 ${name} = ${value}`);
+    else console.error(`✗ 设置变量 ${name} 失败：HTTP ${r.status} ${r.json?.message || ''}`);
+  }
+
   const files = walk(root, root).sort();
   console.log(`\n将同步 ${files.length} 个文件：`);
   for (const f of files) console.log('  ' + f);
