@@ -1,0 +1,11 @@
+{
+  "owner": "你的GitHub用户名",
+  "repo": "mc-server-status",
+  "branch": "main",
+  "token": "在此填入 fine-grained PAT（仅需该仓库 Contents 读写权限）",
+  "serverHost": "127.0.0.1",
+  "serverPort": 25565,
+  "protocolVersion": 767,
+  "timeoutMs": 3000,
+  "keepAliveMinutes": 10
+}
