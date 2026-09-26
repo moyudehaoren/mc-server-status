@@ -203,44 +203,98 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
   }
 
   console.log('');
-  let created = 0, updated = 0, skipped = 0, failed = 0;
+  // ---- 第一遍：只读对比，挑出有变化的文件 ----
+  const changes = [];
+  let skipped = 0;
   for (const rel of files) {
     const content = fs.readFileSync(path.join(root, rel));
     const existing = await api(`/repos/${owner}/${REPO_NAME}${contentPath(rel)}?ref=${branch}`, token);
-
-    let sha = null;
-    if (existing.ok) {
-      sha = existing.json.sha;
+    if (existing.ok && existing.json.content !== undefined) {
       const remote = Buffer.from(String(existing.json.content || '').replace(/\n/g, ''), 'base64');
       if (remote.equals(content)) {
         skipped++;
-        console.log(`  跳过（内容相同） ${rel}`);
         continue;
       }
     }
-
-    const body = {
-      message: `${sha ? 'chore: 更新' : 'chore: 新增'} ${rel}`,
-      content: content.toString('base64'),
-      branch
-    };
-    if (sha) body.sha = sha;
-
-    const put = await api(`/repos/${owner}/${REPO_NAME}${contentPath(rel)}`, token, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-
-    if (put.ok) {
-      if (sha) { updated++; console.log(`  更新 ${rel}`); }
-      else { created++; console.log(`  新增 ${rel}`); }
-    } else {
-      failed++;
-      console.error(`  ✗ 失败 ${rel} → HTTP ${put.status} ${put.json?.message || ''}`);
-    }
+    changes.push({ rel, content });
   }
-  console.log(`\n同步结果：新增 ${created}，更新 ${updated}，未变 ${skipped}，失败 ${failed}`);
+
+  if (!changes.length) {
+    console.log(`所有 ${files.length} 个文件都已是最新，无需提交。`);
+  } else {
+    console.log(`有变化 ${changes.length} 个（未变 ${skipped} 个）：`);
+    for (const c of changes) console.log('  变更 ' + c.rel);
+
+    // ---- 第二遍：用 Git Data API 一次提交完，避免"一个文件一个 commit"造成构建风暴 ----
+    const refRes = await api(`/repos/${owner}/${REPO_NAME}/git/ref/heads/${branch}`, token);
+    const parentSha = refRes.ok ? refRes.json.object.sha : null;
+    let baseTree = null;
+    if (parentSha) {
+      const parentRes = await api(`/repos/${owner}/${REPO_NAME}/git/commits/${parentSha}`, token);
+      if (!parentRes.ok) {
+        console.error(`✗ 读取父提交失败：HTTP ${parentRes.status} ${parentRes.json?.message || ''}`);
+        process.exit(1);
+      }
+      baseTree = parentRes.json.tree.sha;
+    }
+
+    const treeEntries = [];
+    for (const c of changes) {
+      const blob = await api(`/repos/${owner}/${REPO_NAME}/git/blobs`, token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: c.content.toString('base64'), encoding: 'base64' })
+      });
+      if (!blob.ok) {
+        console.error(`✗ 创建 blob 失败 ${c.rel}：HTTP ${blob.status} ${blob.json?.message || ''}`);
+        process.exit(1);
+      }
+      treeEntries.push({ path: c.rel, mode: '100644', type: 'blob', sha: blob.json.sha });
+    }
+
+    const treeBody = { tree: treeEntries };
+    if (baseTree) treeBody.base_tree = baseTree;
+    const treeRes = await api(`/repos/${owner}/${REPO_NAME}/git/trees`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(treeBody)
+    });
+    if (!treeRes.ok) {
+      console.error(`✗ 创建 tree 失败：HTTP ${treeRes.status} ${treeRes.json?.message || ''}`);
+      process.exit(1);
+    }
+
+    const commitBody = { message: `chore: 同步 ${changes.length} 个文件`, tree: treeRes.json.sha };
+    if (parentSha) commitBody.parents = [parentSha];
+    const commitRes = await api(`/repos/${owner}/${REPO_NAME}/git/commits`, token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(commitBody)
+    });
+    if (!commitRes.ok) {
+      console.error(`✗ 创建 commit 失败：HTTP ${commitRes.status} ${commitRes.json?.message || ''}`);
+      process.exit(1);
+    }
+
+    const upd = parentSha
+      ? await api(`/repos/${owner}/${REPO_NAME}/git/refs/heads/${branch}`, token, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sha: commitRes.json.sha, force: false })
+        })
+      : await api(`/repos/${owner}/${REPO_NAME}/git/refs`, token, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commitRes.json.sha })
+        });
+    if (!upd.ok) {
+      console.error(`✗ 更新分支失败：HTTP ${upd.status} ${upd.json?.message || ''}`);
+      process.exit(1);
+    }
+
+    console.log(`✓ 已提交 1 个 commit（含 ${changes.length} 个文件）：${commitRes.json.sha.slice(0, 7)}`);
+    console.log('  GitHub Pages 会重建一次，约 1 分钟后生效。');
+  }
 
   if (wantPages) {
     const pages = await api(`/repos/${owner}/${REPO_NAME}/pages`, token, {
@@ -258,5 +312,5 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
     }
   }
 
-  process.exit(failed ? 1 : 0);
+  process.exit(0);
 })();
