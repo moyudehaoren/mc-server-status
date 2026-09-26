@@ -1,0 +1,9 @@
+# 本机私密配置（含 GitHub Token），绝不提交
+scripts/host.config.json
+scripts/*.log
+*.log
+
+# 临时 / 依赖
+node_modules/
+.npm-cache/
+.DS_Store
