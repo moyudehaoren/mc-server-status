@@ -209,12 +209,44 @@ const contentPath = (rel) => '/contents/' + rel.split('/').map(encodeURIComponen
   }
 
   const { files: fileList, ignored } = walk(root, root);
-  const files = fileList.sort();
+  let files = fileList.sort();
+
+  // --only 路径：只同步指定文件（可写多次），常用于只刷新 tunnel.json。
+  // 显式指定可以覆盖 .gitignore 的排除（例如 status.json/tunnel.json），
+  // 但敏感文件仍然硬拦，绝不允许推上去。
+  const HARD_BLOCK = /(^|\/)(host\.config\.json|\.env[^/]*|[^/]*\.(token|key|pem|log))$/i;
+  const onlyTargets = [];
+  args.forEach((a, i) => {
+    if (a === '--only' && args[i + 1]) onlyTargets.push(args[i + 1]);
+  });
+  if (onlyTargets.length) {
+    for (const t of onlyTargets) {
+      if (files.includes(t)) continue;
+      if (HARD_BLOCK.test(t)) {
+        console.error(`✗ 拒绝同步敏感文件：${t}`);
+        process.exit(1);
+      }
+      if (ignored.includes(t)) {
+        console.log(`• --only 覆盖忽略规则，加入 ${t}`);
+        files.push(t);
+      }
+    }
+    const missing = onlyTargets.filter((t) => !files.includes(t));
+    if (missing.length) {
+      console.error(`✗ --only 指定的文件不存在：${missing.join(', ')}`);
+      process.exit(1);
+    }
+    files = files.filter((f) => onlyTargets.includes(f));
+    console.log(`\n（--only 模式：只同步 ${files.length} 个文件）`);
+  }
   console.log(`\n将同步 ${files.length} 个文件：`);
   for (const f of files) console.log('  ' + f);
   if (ignored.length) {
-    console.log(`已排除 ${ignored.length} 个被忽略的文件（含令牌，不会推送）：`);
-    for (const f of ignored) console.log('  ✗ ' + f);
+    const reallyIgnored = ignored.filter((f) => !files.includes(f));
+    if (reallyIgnored.length) {
+      console.log(`已排除 ${reallyIgnored.length} 个被忽略的文件（含令牌，不会推送）：`);
+      for (const f of reallyIgnored) console.log('  ✗ ' + f);
+    }
   }
 
   if (checkOnly) {

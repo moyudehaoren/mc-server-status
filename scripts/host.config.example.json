@@ -9,5 +9,8 @@
   "timeoutMs": 3000,
   "keepAliveMinutes": 10,
   "minPushIntervalMinutes": 2,
-  "machineKeepAliveMinutes": 30
+  "machineKeepAliveMinutes": 30,
+  "natfrpTunnel": "你的隧道ID或隧道名称",
+  "natfrpTokenFile": "E:/path/to/.secrets/natfrp-token.txt",
+  "tunnelCheckSeconds": 300
 }

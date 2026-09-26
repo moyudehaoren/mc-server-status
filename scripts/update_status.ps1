@@ -44,6 +44,8 @@ param(
     [int]$KeepAliveMinutes,
     [int]$MinPushIntervalMinutes = -1,
     [int]$MachineKeepAliveMinutes = -1,
+    [int]$TunnelCheckSeconds = -1,
+    [int]$TunnelKeepAliveMinutes = 30,
     [string]$ConfigPath,
     [string]$LogFile,
     [switch]$Force,
@@ -106,6 +108,30 @@ if ($MachineKeepAliveMinutes -lt 0) {
     $cfgMachine = Get-CfgValue 'machineKeepAliveMinutes'
     if ($null -ne $cfgMachine -and "$cfgMachine" -ne '') { $MachineKeepAliveMinutes = [int]$cfgMachine }
     if ($MachineKeepAliveMinutes -lt 0) { $MachineKeepAliveMinutes = 30 }
+}
+
+# --- SakuraFrp tunnel status (maintained from here as well, because GitHub's
+#     cron scheduler has proven unreliable for this repository) ---
+$natfrpTunnel = Get-CfgValue 'natfrpTunnel'
+$natfrpTokenFile = Get-CfgValue 'natfrpTokenFile'
+if (-not $natfrpTokenFile) {
+    $natfrpTokenFile = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) '.secrets\natfrp-token.txt'
+}
+if (-not $PSBoundParameters.ContainsKey('TunnelCheckSeconds')) {
+    $cfgTunnelCheck = Get-CfgValue 'tunnelCheckSeconds'
+    if ($null -ne $cfgTunnelCheck -and "$cfgTunnelCheck" -ne '') { $TunnelCheckSeconds = [int]$cfgTunnelCheck }
+    if ($TunnelCheckSeconds -lt 0) { $TunnelCheckSeconds = 300 }
+}
+
+$script:TunnelSelector = $natfrpTunnel
+$script:TunnelToken = $null
+if ($natfrpTunnel) {
+    try {
+        if ($natfrpTokenFile -and (Test-Path -LiteralPath $natfrpTokenFile)) {
+            $script:TunnelToken = (Get-Content -LiteralPath $natfrpTokenFile -Raw).Trim()
+        }
+    } catch { }
+    if (-not $script:TunnelToken -and $env:NATFRP_TOKEN) { $script:TunnelToken = $env:NATFRP_TOKEN.Trim() }
 }
 
 # ------------------------------------------------------------------- logging
@@ -387,6 +413,9 @@ $script:RemoteAgeMinutes = [double]::MaxValue
 $script:LastPushAttempt  = [datetime]::MinValue
 $script:LastPushFailed   = $false
 $script:LastCycleOnline  = $null
+$script:LastTunnelCheck  = [datetime]::MinValue
+$script:LastTunnelPush   = [datetime]::MinValue
+$script:LastTunnelStateKey = $null
 
 $headers = @{
     Authorization = "Bearer $Token"
@@ -569,6 +598,78 @@ function Invoke-HeartbeatCycle {
     return [pscustomobject]@{ Online = [bool]$status.online; Pushed = $false; Error = 'publish did not complete' }
 }
 
+function Publish-TunnelStatus {
+    param([Parameter(Mandatory = $true)][string]$Json)
+    $uri = "https://api.github.com/repos/$Owner/$Repo/contents/tunnel.json"
+    $sha = $null
+    try { $sha = (Invoke-RestMethod -Uri "$uri`?ref=$Branch" -Headers $headers -Method Get).sha } catch { }
+    $body = @{
+        message = 'chore(tunnel): update SakuraFrp tunnel status'
+        content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Json))
+        branch  = $Branch
+    }
+    if ($sha) { $body['sha'] = $sha }
+    try {
+        Invoke-RestMethod -Uri $uri -Headers $headers -Method Put -Body ($body | ConvertTo-Json -Compress) -ContentType 'application/json' | Out-Null
+        return $true
+    } catch {
+        Write-Log ("Tunnel publish failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
+function Update-TunnelStatus {
+    param([switch]$ForceCheck)
+    if (-not $script:TunnelToken -or -not $script:TunnelSelector) { return }
+    if (-not $ForceCheck -and ((Get-Date) - $script:LastTunnelCheck).TotalSeconds -lt $TunnelCheckSeconds) { return }
+    $script:LastTunnelCheck = Get-Date
+
+    $list = $null
+    try {
+        $list = Invoke-RestMethod -Uri 'https://api.natfrp.com/v4/tunnels' -Method Get -TimeoutSec 20 -Headers @{
+            Authorization = "Bearer $($script:TunnelToken)"
+            'User-Agent'  = 'mc-server-status-watcher'
+            Accept        = 'application/json'
+        }
+    } catch {
+        Write-Log ("Tunnel API request failed: {0}" -f $_.Exception.Message)
+        return
+    }
+
+    $tunnel = @($list) | Where-Object {
+        ("$($_.id)" -eq "$($script:TunnelSelector)") -or ($_.name -eq $script:TunnelSelector)
+    } | Select-Object -First 1
+    if (-not $tunnel) {
+        Write-Log ("Tunnel '$($script:TunnelSelector)' not found in the SakuraFrp account.")
+        return
+    }
+
+    $online = ($tunnel.online -eq $true)
+    $stateKey = '{0}|{1}' -f $online, $tunnel.status
+    $ageMinutes = [double]::MaxValue
+    if ($script:LastTunnelPush -ne [datetime]::MinValue) {
+        $ageMinutes = ((Get-Date) - $script:LastTunnelPush).TotalMinutes
+    }
+    if ($script:LastTunnelStateKey -eq $stateKey -and $ageMinutes -lt $TunnelKeepAliveMinutes) { return }
+
+    $payload = [ordered]@{
+        online        = $online
+        status        = $tunnel.status
+        status_reason = $tunnel.status_reason
+        name          = $tunnel.name
+        updated_at    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        source        = 'sakurafrp-api'
+    }
+    $json = ($payload | ConvertTo-Json -Depth 3) + "`n"
+
+    if (Publish-TunnelStatus -Json $json) {
+        $script:LastTunnelStateKey = $stateKey
+        $script:LastTunnelPush = Get-Date
+        $stateText = if ($online) { 'online' } else { 'offline' }
+        Write-Log ("Tunnel '$($tunnel.name)' is $stateText - published tunnel.json.")
+    }
+}
+
 # ------------------------------------------------------------------- main flow
 if ($Watch) {
     # single instance: the watchdog task may launch us while we are already running
@@ -582,6 +683,7 @@ if ($Watch) {
         while ($true) {
             $cycle = Invoke-HeartbeatCycle
             if ($cycle.Error) { Write-Log ("Cycle error: {0}" -f $cycle.Error) }
+            Update-TunnelStatus
             $wait = if ($cycle.Online) { $WatchFastSeconds } else { $WatchIdleSeconds }
             if ($cycle.Error -and -not $cycle.Pushed) { $wait = [Math]::Max($wait, 30) }
             Start-Sleep -Seconds $wait

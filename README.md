@@ -51,8 +51,8 @@ https://<用户名>.github.io/mc-server-status/
   │    └─ 通过 GitHub API 写 status.json（无需安装 git）
   │
 GitHub 仓库
-  ├─ .github/workflows/tunnel-check.yml  每 5 分钟查询樱花 API
-  │    └─ 写 tunnel.json（隧道在线状态）
+  ├─ tunnel.json（隧道在线状态）：常驻进程每 5 分钟查樱花 API 后写入
+  │    └─ 备用通道：.github/workflows/tunnel-check.yml（本仓库的 GitHub cron 实测不触发，默认不依赖它）
   └─ GitHub Pages 托管 index.html + status.json + tunnel.json
   │
 访问者浏览器  →  每 30 秒拉取两个 JSON，合成最终状态
@@ -61,6 +61,10 @@ GitHub 仓库
 > 看门狗：Windows 任务计划每 30 分钟启动一次监听进程；进程内的互斥锁保证
 > 已经在跑时直接退出，挂了才会被重新拉起。启动通过 `wscript.exe` + `run-hidden.vbs`
 > 完成，**不会有任何控制台窗口闪出来**（直接用 powershell.exe 会闪）。
+>
+> 隧道状态：原本设计成由 GitHub Actions 的 cron 查询，但本仓库实测 **cron 一次都不触发**
+> （工作流 `state=active` 也不跑），于是改由**常驻进程顺带查询**——樱花访问密钥本来就在本机。
+> 工作流保留为备用通道：手动 Run workflow 是能正常工作的。
 
 - **status.json**：由你的电脑写入（唯一能拿到真实人数和玩家名的来源）
 - **tunnel.json**：由 GitHub Actions 写入（电脑关机时它仍在工作，用来交叉验证隧道）
@@ -110,6 +114,8 @@ mc-server-status/
    ```powershell
    Copy-Item scripts\host.config.example.json scripts\host.config.json
    notepad scripts\host.config.json      # 填 owner / repo / token / serverPort
+   # 还要填两个樱花字段：natfrpTunnel（隧道 ID 或名称）
+   #                     natfrpTokenFile（访问密钥文件路径，默认 ..\.secrets\natfrp-token.txt）
    ```
    `host.config.json` 已在 `.gitignore` 里，**不会被提交**。
 4. 先跑一次空测（不联网、不上报，只看能不能 ping 到游戏）：
@@ -169,6 +175,8 @@ mc-server-status/
 | `-Watch` | — | 常驻模式：进程内循环探测，状态一变立刻上报（登录时由启动快捷方式拉起） |
 | `-WatchFastSeconds` | `5` | 常驻模式下"游戏在线"时的探测间隔 |
 | `-WatchIdleSeconds` | `10` | 常驻模式下"游戏没开"时的探测间隔 |
+| `-TunnelCheckSeconds` | `300` | 常驻模式下多久查一次樱花隧道状态（写进 `host.config.json` 的 `tunnelCheckSeconds` 也行） |
+| `-TunnelKeepAliveMinutes` | `30` | 隧道状态无变化时最长多久写一次 `tunnel.json` |
 | `-ConfigPath` / `-LogFile` | `scripts/host.config.json` / `scripts/heartbeat.log` | 配置与日志路径 |
 
 ## 上报节流规则（为什么不会刷屏提交）
