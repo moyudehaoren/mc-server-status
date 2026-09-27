@@ -1,19 +1,18 @@
 {
-    "online":  true,
+    "online":  false,
     "players":  [
-                    "QWQcxc",
-                    "Xmiaoe"
+
                 ],
-    "count":  2,
-    "max":  8,
-    "version":  "1.21.1",
-    "updated_at":  "2026-09-27T15:37:27Z",
+    "count":  0,
+    "max":  null,
+    "version":  null,
+    "updated_at":  "2026-09-27T15:37:53Z",
     "source":  "host-heartbeat",
     "machine":  {
-                    "mem_percent":  68.9,
+                    "mem_percent":  68.8,
                     "mem_used_gb":  10.8,
                     "mem_total_gb":  15.6,
-                    "uptime_minutes":  983.2,
-                    "cpu_percent":  25
+                    "uptime_minutes":  983.6,
+                    "cpu_percent":  42
                 }
 }
