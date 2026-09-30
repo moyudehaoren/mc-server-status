@@ -1,8 +1,8 @@
 {
-  "online": false,
-  "status": 0,
-  "status_reason": null,
-  "name": "lianji",
-  "updated_at": "2026-09-30T06:52:08.572Z",
-  "source": "sakurafrp-api"
+    "online":  true,
+    "status":  0,
+    "status_reason":  null,
+    "name":  "lianji",
+    "updated_at":  "2026-09-30T08:30:43Z",
+    "source":  "sakurafrp-api"
 }
