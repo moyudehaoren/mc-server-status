@@ -6,13 +6,13 @@
     "count":  0,
     "max":  null,
     "version":  null,
-    "updated_at":  "2026-10-02T09:57:55Z",
+    "updated_at":  "2026-10-02T10:27:58Z",
     "source":  "host-heartbeat",
     "machine":  {
-                    "mem_percent":  49.9,
-                    "mem_used_gb":  7.8,
+                    "mem_percent":  69.2,
+                    "mem_used_gb":  10.8,
                     "mem_total_gb":  15.6,
-                    "uptime_minutes":  35.1,
-                    "cpu_percent":  11
+                    "uptime_minutes":  65.2,
+                    "cpu_percent":  29
                 }
 }
