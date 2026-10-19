@@ -382,6 +382,20 @@ function tunnelKnown(tunnel) {
 }
 
 // ── 主循环 ──────────────────────────────────────────────────────────────────
+// 部署已停用：心跳脚本不再运行，页面上的旧数据不能当真实状态展示。
+// 探一次数据源，连不上就锁定为"服务已停用"，避免看到过期/误导性的绿点。
+const DEPLOY_DISABLED = true;
+
+function showDecommissioned() {
+  document.getElementById('dot').className = 'dot unknown';
+  document.getElementById('statusText').textContent = '服务已停用';
+  document.getElementById('statusHint').textContent = '本状态页暂时不再更新';
+  document.getElementById('subtitle').textContent = '开服状态页已下线，暂时不再维护';
+  const chips = document.getElementById('chips');
+  if (chips) chips.innerHTML = '<li class="empty">—</li>';
+  refresh = async () => {};
+}
+
 async function refresh() {
   const sub = document.getElementById('subtitle');
   try {
@@ -389,9 +403,11 @@ async function refresh() {
       loadJson('status.json'),
       loadJson('tunnel.json').catch(() => ({}))   // 隧道文件可选
     ]);
+    if (DEPLOY_DISABLED) { showDecommissioned(); return; }
     sub.textContent = '心跳：主机脚本 → status.json　|　隧道：GitHub Actions → tunnel.json';
     render(game, tunnel || {});
   } catch (err) {
+    if (DEPLOY_DISABLED) { showDecommissioned(); return; }
     sub.textContent = '读取数据失败：' + err.message;
     document.getElementById('dot').className = 'dot unknown';
     document.getElementById('statusText').textContent = '状态未知';
@@ -400,7 +416,7 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, REFRESH_MS);
+setInterval(() => refresh(), REFRESH_MS);
 // 页面重新获得焦点时立即刷新一次
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 </script>
