@@ -1,5 +1,20 @@
 # mc-server-status · Minecraft 开服状态页
 
+> ## ⏸ 已停用（2026-10-07）
+>
+> 本项目的自动部署已解除，暂时不再使用。现状：
+>
+> - **本机**：常驻心跳进程已停止，`MC-Server-Status-Heartbeat` 计划任务与启动快捷方式已删除——
+>   不会再有东西后台运行，也不会再闪控制台窗口
+> - **GitHub 侧**：一行命令部署已停用（`tools/deploy.js` 只是本地工具，不常驻）；
+>   两个 Actions 工作流（樱花定时检测、Pages 部署）已从仓库删除
+> - **页面**：`index.html` 已改成「服务已停用」，不再展示心跳数据；`status.json` / `tunnel.json` 已删除
+> - **GitHub Pages 站点与仓库本身仍在**（当前令牌没有删除它们的权限）
+>
+> 想重新启用：在本地重新跑 `scripts/register-task.ps1` 装回常驻+看门狗，
+> 把 `index.html` 里的 `DEPLOY_DISABLED` 改回 `false`，再重新建一个 Pages 部署工作流即可。
+> 完整代码和本文档都留在本地 `E:\dsh\mc-server-status`。
+
 一个纯静态的 GitHub Pages 页面，实时显示**我现在是否开服**：开关状态、在线人数、玩家名；
 左侧还有一块**主机面板**：电脑是否开机、CPU / 内存占用、开机时长。
 
